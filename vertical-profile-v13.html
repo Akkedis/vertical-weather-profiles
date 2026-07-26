@@ -1,0 +1,1623 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Vertical profile — Western Cape</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Open+Sans:wght@400;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" defer></script>
+<style>
+  :root { --ink:#2c2c2a; --muted:#6f6e69; --line:#d8d6cf; --bg:#faf9f6; }
+  * { box-sizing:border-box; }
+  body { margin:0; padding:20px 24px; background:var(--bg); color:var(--ink);
+         font:14px/1.5 -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; }
+  main { max-width:1500px; margin:0 auto; }
+  h1 { font-size:19px; font-weight:600; margin:0 0 4px; }
+  .sub { color:var(--muted); font-size:13px; margin:0 0 16px; }
+  /* Controls, status and readout stay pinned so the hover values remain
+     visible when you have scrolled down to the temperature panel. The title
+     is deliberately left outside — it would cost screen height for nothing. */
+  .sticky-head { position:sticky; top:0; z-index:10; background:var(--bg);
+                 padding:8px 0 6px; border-bottom:1px solid var(--line); margin-bottom:10px; }
+  .controls { display:flex; flex-wrap:wrap; gap:10px 14px; align-items:flex-end; margin-bottom:12px; }
+  .ctl { display:flex; flex-direction:column; gap:3px; }
+  .ctl label { font-size:11px; color:var(--muted); text-transform:uppercase; letter-spacing:.04em; }
+  select, input, button { font:inherit; padding:6px 8px; border:1px solid var(--line);
+                          border-radius:5px; background:#fff; color:inherit; }
+  input[type=number] { width:96px; }
+  button { cursor:pointer; background:var(--ink); color:#fff; border-color:var(--ink); padding:7px 14px; }
+  button:disabled { opacity:.5; cursor:default; }
+  .status { font-size:12px; color:var(--muted); min-height:18px; margin-bottom:6px; }
+  .status.err { color:#a32d2d; }
+  .readout { display:flex; gap:18px; font-size:13px; font-variant-numeric:tabular-nums;
+             min-height:22px; margin-bottom:4px; }
+  .readout .k { color:var(--muted); }
+  .chartwrap { background:#fff; border:1px solid var(--line); border-radius:6px; padding:10px 12px 6px; }
+  .canvasbox { position:relative; }
+  #overlay { position:absolute; left:0; top:0; width:100%; pointer-events:none; }
+  .zoombar { display:flex; align-items:center; gap:10px; font-size:11px;
+             color:var(--muted); padding:4px 0 2px; }
+  .zoombar button { font:inherit; padding:3px 9px; border:1px solid var(--line);
+                    border-radius:4px; background:#fff; color:inherit; cursor:pointer; }
+  canvas { display:block; width:100%; cursor:crosshair; }
+  .legend { display:flex; flex-wrap:wrap; align-items:center; gap:4px 11px; margin-top:10px; font-size:11px; color:var(--muted); }
+  .legend b { font-weight:500; color:var(--ink); margin-right:2px; }
+  .legend i { display:inline-block; width:14px; height:14px; border-radius:2px;
+              border:1px solid rgba(0,0,0,.25); vertical-align:-3px; margin-right:3px; }
+  .legend .ln { width:16px; height:0; border:0; border-top:2px solid #000; border-radius:0; }
+  .legend .dash { width:16px; height:0; border:0; border-top:2px dashed #7a4b1e; border-radius:0; }
+  .legend .night { background:#000088; opacity:.28; }
+  .note { margin-top:16px; font-size:12px; color:var(--muted); line-height:1.6;
+          border-top:1px solid var(--line); padding-top:12px; max-width:900px; }
+  .modal { position:fixed; inset:0; background:rgba(0,0,0,.45); z-index:500;
+           display:flex; align-items:center; justify-content:center; }
+  .modal[hidden] { display:none; }
+  .modal__box { background:#fff; border-radius:8px; width:min(860px,92vw); overflow:hidden;
+                box-shadow:0 12px 40px rgba(0,0,0,.3); }
+  .modal__head { display:flex; align-items:center; justify-content:space-between;
+                 padding:10px 14px; border-bottom:1px solid var(--line); font-weight:600; }
+  .modal__head button { background:none; border:0; font-size:20px; cursor:pointer; color:var(--muted); padding:0 4px; }
+  #vp-map { height:min(440px,55vh); width:100%; }
+  .modal__foot { display:flex; align-items:center; gap:9px; padding:10px 14px;
+                 border-top:1px solid var(--line); flex-wrap:wrap; font-size:13px; }
+  .modal__foot .grow { flex:1 1 auto; }
+  #pickName { width:170px; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Vertical profile</h1>
+  <p class="sub">Wind and temperature over height, from Open-Meteo. Free, no API key, runs entirely in this page.</p>
+
+  <header class="sticky-head">
+  <div class="controls">
+    <div class="ctl">
+      <label for="place">Place</label>
+      <select id="place">
+        <option value="-33.9575,18.4030" selected>Table Mountain</option>
+        <option value="-33.3800,19.6700">Matroosberg</option>
+        <option value="-32.3150,19.1500">Sneeuberg (Cederberg)</option>
+        <option value="-33.753698,19.189022">Du Toits Peak</option>
+        <option value="-33.3800,21.3800">Seweweekspoortpiek</option>
+        <option value="-33.9800,18.9500">Jonkershoek</option>
+        <option value="-34.1140,18.4390">Kalk Bay</option>
+        <option value="custom">Custom…</option>
+      </select>
+    </div>
+    <button id="pick">Pick on map</button>
+    <div class="ctl"><label for="lat">Latitude</label><input id="lat" type="number" step="0.0001" value="-33.9575"></div>
+    <div class="ctl"><label for="lon">Longitude</label><input id="lon" type="number" step="0.0001" value="18.4030"></div>
+    <div class="ctl">
+      <label for="model">Model</label>
+      <select id="model">
+        <option value="best_match" selected>Best match &mdash; 7.8 km</option>
+        <option value="ukmo_global_deterministic_10km">UKMO global &mdash; 10.4 km</option>
+        <option value="gfs_global">GFS &mdash; 13 km</option>
+        <option value="cma_grapes_global">CMA GRAPES &mdash; 13.9 km</option>
+        <option value="gem_global">GEM global &mdash; 16.7 km</option>
+        <option value="icon_global">ICON global &mdash; 27.8 km</option>
+        <option value="ecmwf_ifs025">ECMWF IFS &mdash; 27.8 km</option>
+      </select>
+    </div>
+    <div class="ctl">
+      <label for="top">Top of axis</label>
+      <select id="top">
+        <option value="1000">1 000 m</option>
+        <option value="1500" selected>1 500 m</option>
+        <option value="2500">2 500 m</option>
+        <option value="3000">3 000 m</option>
+        <option value="4000">4 000 m</option>
+      </select>
+    </div>
+    <div class="ctl">
+      <label for="size">Chart height</label>
+      <select id="size">
+        <option value="240">Compact</option>
+        <option value="320">Standard</option>
+        <option value="420">Tall</option>
+        <option value="600" selected>Very tall</option>
+        <option value="760">Huge</option>
+      </select>
+    </div>
+    <div class="ctl">
+      <label for="arrows">Arrows</label>
+      <select id="arrows"><option value="1" selected>Show</option><option value="0">Hide</option></select>
+    </div>
+    <div class="ctl">
+      <label for="days">Days</label>
+      <select id="days"><option selected>3</option><option>5</option><option>7</option></select>
+    </div>
+    <div class="ctl">
+      <label for="blend">Cells</label>
+      <select id="blend">
+        <option value="1" selected>Blend neighbours</option>
+        <option value="0">Nearest only</option>
+      </select>
+    </div>
+    <div class="ctl">
+      <label for="cloudstyle">Cloud style</label>
+      <select id="cloudstyle">
+        <option value="windy">Windy (smooth)</option>
+        <option value="meteoblue" selected>Meteoblue (bands)</option>
+      </select>
+    </div>
+    <div class="ctl">
+      <label for="trailhead">Trailhead m</label>
+      <input id="trailhead" type="number" step="10" placeholder="auto">
+    </div>
+  </div>
+
+  <div class="status" id="status">Ready.</div>
+  <div class="readout" id="readout"></div>
+  </header>
+
+  <div class="chartwrap">
+    <div class="canvasbox">
+      <canvas id="chart"></canvas>
+      <canvas id="overlay"></canvas>
+    </div>
+    <div class="zoombar">
+      <span id="zoominfo">Drag across the chart to zoom &middot; double-click to reset</span>
+      <button id="zoomout" hidden>Reset zoom</button>
+    </div>
+  </div>
+
+  <div class="legend" id="legWind"></div>
+  <div class="legend" id="legTemp"></div>
+  <div class="legend" id="legCloud"></div>
+
+  <p class="note" id="note"></p>
+</main>
+
+<div class="modal" id="pickModal" hidden>
+  <div class="modal__box">
+    <div class="modal__head">
+      <span>Pick a location</span>
+      <button id="pickClose" title="Close">&times;</button>
+    </div>
+    <div id="vp-map"></div>
+    <div class="modal__foot">
+      <span id="pickInfo" class="grow">Click anywhere on the map to choose a point.</span>
+      <input id="pickName" placeholder="Name to save as" disabled>
+      <button id="pickSave" disabled>Save to list</button>
+      <button id="pickUse" disabled>Use this location</button>
+    </div>
+  </div>
+</div>
+
+<script>
+/* =========================================================================
+   Colour scales and line conventions follow WindGuru.
+
+   Colours: WG.Colors.wind / WG.Colors.temp, read from windguru.cz.
+   Wind is native knots there; held here in m/s and snapped onto the contour
+   interval in the display unit so colour bands and isotachs share edges.
+
+   Lines, read from WindGuru's own chart SVG:
+     minor gridlines  black 0.5px  dash 2,2  opacity 0.10
+     major gridlines  black 1px    dash 2,2  opacity 0.30
+     night band       #000088 at opacity 0.05, full plot height
+     day separation   alternating #d5d5d5 / #f4f4f4 header bands
+     data curves      1.5px solid, full opacity
+   Isoline weights follow the data-curve convention; the 2D chart itself is
+   behind their PRO paywall and could not be inspected directly.
+   ========================================================================= */
+
+const WIND_STOPS_MS = [
+  [0.000,255,255,255],[2.572,255,255,255],[4.579,103,247,241],[6.945,0,255,0],
+  [9.672,255,240,0],[12.707,255,50,44],[16.308,255,10,200],[19.549,255,0,255],
+  [23.150,150,50,255],[30.867,60,60,255],[36.011,0,0,255]
+];
+const TEMP_STOPS_C = [
+  [-25,80,255,220],[-15,171,190,255],[0,255,255,255],[10,255,255,100],
+  [20,255,170,0],[30,255,50,50],[35,255,0,110],[40,255,0,160],[50,255,80,220]
+];
+
+const WIND_STEP = 5, TEMP_STEP = 1, WIND_EMPH = 4, TEMP_EMPH = 5;
+
+/* Two cloud renderings, switchable.
+
+   Windy (default) — a smooth grey ramp over a pale lavender sky, sampled from
+   its meteogram canvas: background rgb(234,234,245), greys stepping 223, 191,
+   159 down toward 130 at full cover.
+
+   Meteoblue — five DISCRETE bands with nothing drawn below 10%, read from its
+   meteogram legend. Quantised on purpose: 60% and 80% are easy to tell apart,
+   which a smooth ramp makes hard.                                          */
+const SKY_FILL = 'rgb(234,234,245)';
+const WINDY_CLOUD = [
+  [0,   234,234,245],
+  [10,  228,228,236],
+  [25,  223,223,223],
+  [50,  191,191,191],
+  [75,  159,159,159],
+  [100, 130,130,130]
+];
+const MB_BANDS = [
+  [10, [255,255,255]], [25, [210,210,210]], [50, [177,177,177]],
+  [75, [146,146,146]], [90, [115,115,115]], [Infinity, [86,86,86]]
+];
+
+/* Rain sits inside the cloud panel, in a shallow band at its foot, exactly as
+   Windy does it — the value is read from the label, so the bar only has to
+   separate light from heavy. Height is square-rooted so a trace still shows. */
+const RAIN_BLUE  = 'rgb(0,64,255)';
+const SNOW_FILL  = '#7fb4e8';
+const RAIN_BAND_FRAC = 0.20;
+const CLOUDBASE_ROW = 19;
+/* Two thin strips above the cloud panel for mid and high cloud, stacked in
+   the order the atmosphere puts them: high, then mid, then the resolved
+   low-level cross-section below. */
+const CLOUD_STRIP = 17;
+/* Linear against a fixed ceiling, so a bar means the same thing on every fetch
+   and between locations. 0.1 mm is meant to be barely visible — the label
+   carries the number. Hours above the ceiling clip; the label still reads. */
+const RAIN_CEILING = 8;          // mm/h at full band height
+/* Lowest level with at least this much cloud counts as the base. */
+const CLOUD_BASE_PCT = 50;
+
+const GRID_MINOR = 'rgba(0,0,0,0.10)';
+const GRID_MAJOR = 'rgba(0,0,0,0.30)';
+const GRID_DASH  = [2, 2];
+const GRID_DAY   = 'rgba(0,0,0,0.55)';   // day boundaries: solid, not dashed
+const NIGHT_FILL = 'rgba(0,0,136,0.05)';
+const BAND_A = '#d5d5d5', BAND_B = '#f4f4f4';
+const ISO_MINOR = 'rgba(0,0,0,0.34)', ISO_MAJOR = 'rgba(0,0,0,0.68)';
+const CONTOUR_CELL = 3;   // marching-squares cell size, px
+
+/* Labels follow WindGuru: Open Sans throughout, roles separated by size and
+   opacity rather than colour. Text is always black; de-emphasis is done with
+   alpha, never with grey.
+     day header   11px  alpha 1.0   one per day, "Su 26.7."
+     hour ticks   10px  alpha 0.5   every 3 hours
+     data values   9px  alpha 1.0
+     secondary     9px  alpha 0.5                                        */
+const FONT   = '"Open Sans", -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif';
+const F_DAY  = `11px ${FONT}`;
+const F_HOUR = `10px ${FONT}`;
+const F_AXIS = `10px ${FONT}`;
+const F_ISO  = `9px ${FONT}`;
+const INK       = 'rgba(0,0,0,1)';
+const INK_FADED = 'rgba(0,0,0,0.5)';
+const HOUR_INCREMENT = 3;    // WindGuru's spacing; widened only if labels would collide
+const HOUR_ROW = 15, DAY_ROW = 19;
+/* WindGuru shows one time axis under the graph. With panels this tall the top
+   one ends up far from it, so hour ticks repeat under each panel. Set false
+   for strict parity. */
+const HOURS_UNDER_EACH = true;
+
+const toKmh = ms => ms * 3.6;
+
+function alignStops(stops, conv, step) {
+  const out = []; let prev = -Infinity;
+  for (const s of stops) {
+    let v = Math.round(conv(s[0]) / step) * step;
+    if (v <= prev) v = prev + step;
+    out.push([v, s[1], s[2], s[3]]); prev = v;
+  }
+  return out;
+}
+function makeRamp(stops) {
+  const first = stops[0], last = stops[stops.length - 1];
+  return v => {
+    if (!(v > first[0])) return [first[1], first[2], first[3]];
+    for (let i = 0; i < stops.length - 1; i++) {
+      const a = stops[i], b = stops[i + 1];
+      if (v <= b[0]) {
+        const f = (v - a[0]) / (b[0] - a[0]);
+        return [a[1]+(b[1]-a[1])*f, a[2]+(b[2]-a[2])*f, a[3]+(b[3]-a[3])*f];
+      }
+    }
+    return [last[1], last[2], last[3]];
+  };
+}
+const windStops = alignStops(WIND_STOPS_MS, toKmh, WIND_STEP);
+const tempStops = alignStops(TEMP_STOPS_C, v => v, TEMP_STEP);
+const windRamp = makeRamp(windStops), tempRamp = makeRamp(tempStops);
+const windyCloud = makeRamp(WINDY_CLOUD);
+function mbBands(v) {
+  for (const [ceil, rgb] of MB_BANDS) if (v < ceil) return rgb;
+  return MB_BANDS[MB_BANDS.length - 1][1];
+}
+function cloudRamp(v) { return cloudStyle === 'windy' ? windyCloud(v) : mbBands(v); }
+const css = c => `rgb(${Math.round(c[1])},${Math.round(c[2])},${Math.round(c[3])})`;
+
+/* ---------- data ------------------------------------------------------- */
+
+/* Reaches to 200 hPa (~12 km) even though the panel only draws to 2500 m —
+   cloud base has to be findable when the only cloud is high cirrus. */
+const LEVELS = [1000, 975, 950, 925, 900, 850, 800, 750, 700, 600, 500, 400, 300, 250, 200];
+
+/* Sample a 5x5 grid of spot heights within +/-5 km so the chart can show how
+   far below the summit the surrounding ground sits. The trailhead is normally
+   somewhere between that minimum and the peak. One extra request per fetch,
+   and it rides along with the cached result. */
+async function nearbyTerrain(lat, lon) {
+  const dLat = 5 / 111.32;
+  const dLon = 5 / (111.32 * Math.cos(lat * Math.PI / 180));
+  const las = [], los = [];
+  for (let i = -2; i <= 2; i++) for (let j = -2; j <= 2; j++) {
+    las.push((lat + (i/2)*dLat).toFixed(4));
+    los.push((lon + (j/2)*dLon).toFixed(4));
+  }
+  try {
+    const j = await (await fetch(
+      `https://api.open-meteo.com/v1/elevation?latitude=${las.join(',')}&longitude=${los.join(',')}`)).json();
+    const e = (j.elevation || []).filter(v => typeof v === 'number');
+    if (!e.length) return { min: null, mean: null };
+    return { min: Math.min(...e), mean: e.reduce((a, b) => a + b, 0) / e.length };
+  } catch (err) { return { min: null, mean: null }; }
+}
+
+/* Probe ring: the target first, then eight points about 12 km out. One
+   multi-location request returns all of them, and the response tells us which
+   model cell each landed in, so we never need to know the grid geometry —
+   which matters because best_match has irregular cells. */
+const BLEND_OFFSET = 0.11;
+
+function buildProbe(lat, lon) {
+  const pts = [[+lat, +lon]];
+  for (const a of [-BLEND_OFFSET, 0, BLEND_OFFSET])
+    for (const b of [-BLEND_OFFSET, 0, BLEND_OFFSET])
+      if (a || b) pts.push([+lat + a, +lon + b]);
+  return pts;
+}
+
+/* How much to blend at a given pressure. Nothing below 925 hPa, full blend at
+   850 and above. Neighbouring cells can sit over sea and land, and their
+   near-surface values then describe genuinely different columns — averaging
+   those produces a profile that exists nowhere. Above the boundary layer the
+   fields are smooth and blending is unobjectionable. */
+function blendFrac(hPa) {
+  if (hPa >= 925) return 0;
+  if (hPa <= 850) return 1;
+  return (925 - hPa) / 75;
+}
+
+async function fetchGrid(lat, lon, model, days) {
+  const vars = [];
+  for (const L of LEVELS) {
+    vars.push(`geopotential_height_${L}hPa`, `temperature_${L}hPa`,
+              `wind_speed_${L}hPa`, `wind_direction_${L}hPa`,
+              `cloud_cover_${L}hPa`);
+  }
+  vars.push('precipitation', 'rain', 'showers', 'snowfall',
+            'precipitation_probability', 'cloud_base',
+            'cloud_cover_mid', 'cloud_cover_high');
+
+  const pts = blendCells ? buildProbe(lat, lon) : [[+lat, +lon]];
+  const url = `https://api.open-meteo.com/v1/forecast`
+    + `?latitude=${pts.map(p => p[0].toFixed(4)).join(',')}`
+    + `&longitude=${pts.map(p => p[1].toFixed(4)).join(',')}`
+    + `&hourly=${vars.join(',')}&daily=sunrise,sunset&models=${model}`
+    + `&forecast_days=${days}&wind_speed_unit=ms&timezone=Africa%2FJohannesburg`;
+
+  const raw = await (await fetch(url)).json();
+  if (raw.error) throw new Error(raw.reason || 'API error');
+  const arr = Array.isArray(raw) ? raw : [raw];
+
+  // arr[0] is the requested point, so its cell is the nearest one.
+  const near = arr[0];
+  const byCell = new Map();
+  for (const o of arr) {
+    const k = o.latitude.toFixed(4) + ',' + o.longitude.toFixed(4);
+    if (!byCell.has(k)) byCell.set(k, o);
+  }
+  const cells = [...byCell.values()];
+
+  // Inverse square distance from the requested point to each cell centre.
+  const kx = 111.32 * Math.cos(+lat * Math.PI / 180);
+  const weights = cells.map(o => {
+    const dy = (o.latitude - +lat) * 111.32, dx = (o.longitude - +lon) * kx;
+    return 1 / Math.max(dy*dy + dx*dx, 0.25);
+  });
+  const wsum = weights.reduce((a, b) => a + b, 0);
+
+  const h = near.hourly;
+  const times = h.time.map(t => new Date(t));
+  const kept = LEVELS.filter(L => {
+    const a = h[`geopotential_height_${L}hPa`];
+    return a && a.some(v => v !== null);
+  });
+  if (!kept.length) throw new Error('This model returns no pressure-level data here.');
+
+  const n = times.length, m = kept.length;
+  const heights = new Float32Array(m*n), wind = new Float32Array(m*n);
+  const temp = new Float32Array(m*n), dir = new Float32Array(m*n);
+  const cloud = new Float32Array(m*n);
+
+  /* Direction has to be blended as a vector, or 350 and 10 average to 180. */
+  for (let i = 0; i < m; i++) {
+    const L = kept[i], f = blendFrac(L);
+    const key = v => `${v}_${L}hPa`;
+    for (let jx = 0; jx < n; jx++) {
+      const k = i*n + jx;
+      const nGh = near.hourly[key('geopotential_height')][jx];
+      const nTp = near.hourly[key('temperature')][jx];
+      const nWs = near.hourly[key('wind_speed')][jx];
+      const nWd = near.hourly[key('wind_direction')][jx];
+      const nCc = near.hourly[key('cloud_cover')][jx];
+
+      if (f <= 0 || cells.length < 2) {
+        heights[k] = nGh; temp[k] = nTp; wind[k] = nWs;
+        dir[k] = nWd; cloud[k] = nCc == null ? 0 : nCc;
+        continue;
+      }
+
+      let gh = 0, tp = 0, ws = 0, cc = 0, ux = 0, uy = 0;
+      for (let c = 0; c < cells.length; c++) {
+        const hh = cells[c].hourly, wgt = weights[c] / wsum;
+        gh += (hh[key('geopotential_height')][jx] ?? nGh) * wgt;
+        tp += (hh[key('temperature')][jx] ?? nTp) * wgt;
+        const sp = hh[key('wind_speed')][jx] ?? nWs;
+        const dg = ((hh[key('wind_direction')][jx] ?? nWd)) * Math.PI / 180;
+        ws += sp * wgt;
+        ux += Math.sin(dg) * sp * wgt;
+        uy += Math.cos(dg) * sp * wgt;
+        cc += ((hh[key('cloud_cover')][jx] ?? nCc) || 0) * wgt;
+      }
+      const bd = (Math.atan2(ux, uy) * 180 / Math.PI + 360) % 360;
+
+      heights[k] = nGh*(1-f) + gh*f;
+      temp[k]    = nTp*(1-f) + tp*f;
+      wind[k]    = nWs*(1-f) + ws*f;
+      cloud[k]   = (nCc == null ? 0 : nCc)*(1-f) + cc*f;
+      let dd = ((bd - nWd + 540) % 360) - 180;
+      dir[k] = (nWd + dd*f + 360) % 360;
+    }
+  }
+
+  /* Surface fields stay on the nearest cell. Blending precipitation would
+     smear a convective shower across 20 km of ground it never fell on. */
+  const zero = a => (a || []).map(v => v == null ? 0 : v);
+  const precip = zero(h.precipitation), rain = zero(h.rain);
+  const showers = zero(h.showers), snow = zero(h.snowfall);
+  const prob = zero(h.precipitation_probability);
+  /* Mid and high cloud sit far above this chart's height axis, so they are
+     carried as the model's own aggregates rather than by stretching the panel
+     to 12 km. Open-Meteo's convention: mid roughly 2-6 km, high above that. */
+  const cloudMid  = zero(h.cloud_cover_mid);
+  const cloudHigh = zero(h.cloud_cover_high);
+
+  const cloudBase = new Array(n).fill(null);
+  for (let jx = 0; jx < n; jx++) {
+    for (let i = 0; i < m; i++) {
+      const k = i*n + jx;
+      if (cloud[k] >= CLOUD_BASE_PCT) { cloudBase[jx] = heights[k]; break; }
+    }
+  }
+
+  const t0 = times[0].getTime(), t1 = times[n-1].getTime(), span = t1 - t0;
+  const frac = d => Math.max(0, Math.min(1, (new Date(d).getTime() - t0) / span));
+  const nights = [];
+  const rise = (near.daily && near.daily.sunrise) || [], set = (near.daily && near.daily.sunset) || [];
+  if (rise.length) {
+    nights.push([0, frac(rise[0])]);
+    for (let i = 0; i < set.length; i++) {
+      const a = frac(set[i]);
+      const b = i + 1 < rise.length ? frac(rise[i+1]) : 1;
+      if (b > a) nights.push([a, b]);
+    }
+  }
+
+  const terrain = await nearbyTerrain(+lat, +lon);
+
+  return { times, nLevels: m, levels: kept, heights, wind, temp, dir, cloud,
+           precip, rain, showers, snow, prob, cloudBase, cloudMid, cloudHigh,
+           elevation: near.elevation, terrainMin: terrain.min, terrainMean: terrain.mean,
+           cellLat: near.latitude, cellLon: near.longitude,
+           cellsUsed: blendCells ? cells.length : 1,
+           model, n, nights };
+}
+
+function columnAt(g, fx) {
+  const raw = fx * (g.n - 1);
+  const j = Math.max(0, Math.min(g.n - 2, Math.floor(raw)));
+  const f = raw - j;
+  const h = [], wind = [], temp = [], dir = [], cloud = [];
+  for (let i = 0; i < g.nLevels; i++) {
+    const a = i*g.n + j, b = a + 1;
+    h.push(g.heights[a]*(1-f) + g.heights[b]*f);
+    wind.push(g.wind[a]*(1-f) + g.wind[b]*f);
+    temp.push(g.temp[a]*(1-f) + g.temp[b]*f);
+    cloud.push(g.cloud[a]*(1-f) + g.cloud[b]*f);
+    const d = ((g.dir[b] - g.dir[a] + 540) % 360) - 180;
+    dir.push((g.dir[a] + d*f + 360) % 360);
+  }
+  return { h, wind, temp, dir, cloud };
+}
+
+function atHeight(col, field, hv) {
+  const n = col.h.length;
+  if (hv <= col.h[0]) return field[0];
+  if (hv >= col.h[n-1]) return field[n-1];
+  let i = 0;
+  while (i < n - 2 && col.h[i+1] < hv) i++;
+  const f = (hv - col.h[i]) / (col.h[i+1] - col.h[i]);
+  return field[i]*(1-f) + field[i+1]*f;
+}
+
+/* ---------- contouring: marching squares -------------------------------
+   Produces real line segments that get stroked as paths, so contours come
+   out smooth and continuous. The previous per-column crossing test drew
+   1px rectangles, which broke up wherever a contour ran steeply.        */
+
+function crossFrac(a, b) {
+  const d = a - b;
+  return d === 0 ? 0.5 : Math.max(0, Math.min(1, a / d));
+}
+
+function contourSegments(f, w, h, level, cell) {
+  const segs = [];
+  for (let y = 0; y + cell < h; y += cell) {
+    for (let x = 0; x + cell < w; x += cell) {
+      const x2 = x + cell, y2 = y + cell;
+      const v0 = f[y*w + x] - level,  v1 = f[y*w + x2] - level;
+      const v2 = f[y2*w + x2] - level, v3 = f[y2*w + x] - level;
+      let idx = 0;
+      if (v0 > 0) idx |= 8;
+      if (v1 > 0) idx |= 4;
+      if (v2 > 0) idx |= 2;
+      if (v3 > 0) idx |= 1;
+      if (idx === 0 || idx === 15) continue;
+
+      const top    = [x + cell*crossFrac(v0, v1), y];
+      const right  = [x2, y + cell*crossFrac(v1, v2)];
+      const bottom = [x + cell*crossFrac(v3, v2), y2];
+      const left   = [x, y + cell*crossFrac(v0, v3)];
+
+      switch (idx) {
+        case 1: case 14: segs.push(left, bottom); break;
+        case 2: case 13: segs.push(bottom, right); break;
+        case 3: case 12: segs.push(left, right); break;
+        case 4: case 11: segs.push(top, right); break;
+        case 6: case 9:  segs.push(top, bottom); break;
+        case 7: case 8:  segs.push(left, top); break;
+        case 5:  segs.push(left, top, bottom, right); break;
+        case 10: segs.push(left, bottom, top, right); break;
+      }
+    }
+  }
+  return segs;
+}
+
+function strokeSegments(g, segs, x0, y0, colour, width) {
+  if (!segs.length) return;
+  g.strokeStyle = colour; g.lineWidth = width;
+  g.lineCap = 'round'; g.lineJoin = 'round';
+  g.setLineDash([]);
+  g.beginPath();
+  for (let i = 0; i + 1 < segs.length; i += 2) {
+    g.moveTo(x0 + segs[i][0],   y0 + segs[i][1]);
+    g.lineTo(x0 + segs[i+1][0], y0 + segs[i+1][1]);
+  }
+  g.stroke();
+}
+
+/* ---------- field smoothing --------------------------------------------
+
+   Model levels are hundreds of metres apart, so linear interpolation between
+   them leaves visible kinks and the cloud field comes out angular. Windy's
+   clouds look rounded because the field is smoothed before it is painted.
+   A separable box blur run twice is a close enough Gaussian and costs one
+   pass per axis.                                                          */
+
+const clamp = (v, lo, hi) => v < lo ? lo : v > hi ? hi : v;
+
+function blur1D(src, dst, w, h, r, horizontal) {
+  const n = 2*r + 1;
+  if (horizontal) {
+    for (let y = 0; y < h; y++) {
+      const row = y*w;
+      let sum = 0;
+      for (let k = -r; k <= r; k++) sum += src[row + clamp(k, 0, w-1)];
+      for (let x = 0; x < w; x++) {
+        dst[row + x] = sum / n;
+        sum -= src[row + clamp(x - r, 0, w-1)];
+        sum += src[row + clamp(x + r + 1, 0, w-1)];
+      }
+    }
+  } else {
+    for (let x = 0; x < w; x++) {
+      let sum = 0;
+      for (let k = -r; k <= r; k++) sum += src[clamp(k, 0, h-1)*w + x];
+      for (let y = 0; y < h; y++) {
+        dst[y*w + x] = sum / n;
+        sum -= src[clamp(y - r, 0, h-1)*w + x];
+        sum += src[clamp(y + r + 1, 0, h-1)*w + x];
+      }
+    }
+  }
+}
+
+function smoothField(src, w, h, r, passes) {
+  const a = Float32Array.from(src), b = new Float32Array(w*h);
+  for (let p = 0; p < passes; p++) {
+    blur1D(a, b, w, h, r, true);
+    blur1D(b, a, w, h, r, false);
+  }
+  return a;
+}
+
+/* ---------- rendering ---------------------------------------------------
+
+   Layout per panel, matching the request for times above and below:
+       panel title
+       day band      "Sun 26 Jul 2026"
+       hour ticks
+       ---- plot ----
+       hour ticks
+       day band
+                                                                          */
+
+const PAD_L = 42, PAD_R = 40, HEAD = 18, GAP = 18, TOP = 4;
+const AXIS_BLOCK = DAY_ROW + HOUR_ROW;
+
+/* Isolines are uniform in WindGuru's 2D chart — no minor/major distinction.
+   Set ISO_EMPHASIS true to bring back weighted every-Nth lines. */
+const ISO_EMPHASIS = false;
+const ISO_COLOUR = 'rgba(0,0,0,0.45)';
+const ISO_WIDTH  = 0.9;
+const LABEL_SPACING = 150;   // px of arc length between repeats of a label
+const LABEL_GAP     = 11;    // px half-width of the break cut in the line
+
+/* Wind direction arrows, taken from WG.svgArrowInline. The path points up at
+   zero rotation and is turned by direction + 180, so it shows where the wind
+   is going rather than where it comes from.
+   WG.Colors.barbs is an alpha ramp, not a colour: transparent below ~2 kt,
+   0.3 at 5 kt, solid at 10 kt. Held here in m/s. */
+const ARROW_PATH = new Path2D('M50,0 L30,30 L46,27 L43,90 L57,90 L54,27 L70,30 Z');
+const ARROW_ALPHA = [[1.029, 0], [2.572, 0.3], [5.144, 1]];
+const ARROW_DX = 52, ARROW_DY = 50, ARROW_SIZE = 15;
+
+/* ---- view window -----------------------------------------------------
+   Every pixel-to-data mapping goes through these, so zooming is a change of
+   two ranges rather than a change to a dozen drawing routines.
+   viewT is a fraction of the whole time series; viewH is metres, or null
+   meaning the full axis.                                                */
+let viewT = [0, 1], viewH = null;
+const VIEW = { plotW: 1, panelH: 1, padL: 0 };
+
+const hSpan  = () => viewH || [0, axisTop];
+const tAtPx  = px => viewT[0] + (px/(VIEW.plotW - 1))*(viewT[1] - viewT[0]);
+const xAtT   = f  => VIEW.padL + ((f - viewT[0])/(viewT[1] - viewT[0]))*VIEW.plotW;
+const hAtPy  = py => { const [a,b] = hSpan(); return b - (py/(VIEW.panelH - 1))*(b - a); };
+const yAtH   = (m, top) => { const [a,b] = hSpan();
+                             return top + (1 - (m - a)/(b - a))*VIEW.panelH; };
+const isZoomed = () => viewT[0] > 0 || viewT[1] < 1 || viewH !== null;
+
+let layout = null, grid = null, axisTop = 2500, panelH = 600, showArrows = true;
+let cloudStyle = 'meteoblue';
+let blendCells = true;
+
+function arrowAlpha(ms) {
+  if (ms <= ARROW_ALPHA[0][0]) return 0;
+  for (let i = 0; i < ARROW_ALPHA.length - 1; i++) {
+    const a = ARROW_ALPHA[i], b = ARROW_ALPHA[i + 1];
+    if (ms <= b[0]) return a[1] + (b[1] - a[1]) * ((ms - a[0]) / (b[0] - a[0]));
+  }
+  return 1;
+}
+
+function draw() {
+  if (!grid) return;
+  const cv = document.getElementById('chart');
+  const cssW = cv.parentElement.clientWidth - 24;
+  const plotW = Math.max(160, Math.round(cssW - PAD_L - PAD_R));
+  VIEW.plotW = plotW; VIEW.panelH = panelH; VIEW.padL = PAD_L;
+
+  const wF = new Float32Array(plotW * panelH), tF = new Float32Array(plotW * panelH);
+  const cF = new Float32Array(plotW * panelH);
+  for (let px = 0; px < plotW; px++) {
+    const col = columnAt(grid, tAtPx(px));
+    for (let py = 0; py < panelH; py++) {
+      const hv = hAtPy(py);
+      const k = py * plotW + px;
+      wF[k] = toKmh(atHeight(col, col.wind, hv));
+      tF[k] = atHeight(col, col.temp, hv);
+      cF[k] = atHeight(col, col.cloud, hv);
+    }
+  }
+
+  // Only the cloud field is smoothed; wind and temperature carry contour
+  // lines whose positions should stay faithful to the data.
+  const cS = smoothField(cF, plotW, panelH,
+                         Math.max(3, Math.round(panelH * 0.022)), 2);
+
+  const specs = [
+    { f: wF, ramp: windRamp, step: WIND_STEP, emph: WIND_EMPH,
+      label: 'Wind (km/h)', arrows: true, iso: true, extra: 0 },
+    { f: tF, ramp: tempRamp, step: TEMP_STEP, emph: TEMP_EMPH,
+      label: 'Temperature (\u00B0C)', arrows: false, iso: true, extra: 0 },
+    { f: cS, ramp: cloudRamp, step: 25, emph: 1,
+      label: 'Cloud cover, rain and cloud base', arrows: false, iso: false,
+      cloud: true, above: CLOUD_STRIP*2, extra: CLOUDBASE_ROW }
+  ];
+
+  const blockTops = []; let y = TOP;
+  for (const sp of specs) {
+    blockTops.push(y);
+    y += HEAD + AXIS_BLOCK + (sp.above || 0) + panelH + sp.extra + AXIS_BLOCK + GAP;
+  }
+  const cssH = y - GAP + 4;
+  const panelTops = specs.map((sp, i) => blockTops[i] + HEAD + AXIS_BLOCK + (sp.above || 0));
+
+  const dpr = Math.min(2, window.devicePixelRatio || 1);
+  cv.width = Math.round(cssW * dpr); cv.height = Math.round(cssH * dpr);
+  cv.style.height = cssH + 'px';
+  const g = cv.getContext('2d');
+  g.setTransform(dpr, 0, 0, dpr, 0, 0);
+  g.clearRect(0, 0, cssW, cssH);
+  g.font = F_AXIS;
+
+  specs.forEach((p, i) => {
+    const top = panelTops[i], blockTop = blockTops[i];
+
+    g.font = F_DAY; g.fillStyle = INK;
+    g.textAlign = 'left'; g.textBaseline = 'alphabetic'; g.setLineDash([]);
+    g.fillText(p.label, PAD_L, blockTop + 13);
+
+    dayBand(g, PAD_L, blockTop + HEAD, plotW);
+    hourLabels(g, PAD_L, blockTop + HEAD + DAY_ROW, plotW);
+    if (p.above) cloudStrips(g, PAD_L, blockTop + HEAD + AXIS_BLOCK, plotW);
+
+    paint(g, p.f, p.ramp, PAD_L, top, plotW, panelH);
+
+    g.save();
+    g.beginPath(); g.rect(PAD_L, top, plotW, panelH); g.clip();
+    night(g, PAD_L, top, plotW, panelH);
+    gridlines(g, PAD_L, top, plotW, panelH);
+    if (p.iso) isolines(g, p.f, plotW, panelH, PAD_L, top, p.step, p.emph);
+    freezingLine(g, tF, plotW, panelH, PAD_L, top);
+    if (p.arrows && showArrows) arrows(g, PAD_L, top, plotW, panelH);
+    if (p.cloud) rainBars(g, PAD_L, top, plotW, panelH);
+    groundLine(g, PAD_L, top, plotW, panelH);
+    g.restore();
+
+    yAxis(g, PAD_L, top, panelH);
+    g.strokeStyle = 'rgba(0,0,0,.45)'; g.lineWidth = 1; g.setLineDash([]);
+    g.strokeRect(PAD_L + .5, top + .5, plotW - 1, panelH - 1);
+
+    let below = top + panelH;
+    if (p.cloud) { cloudBaseRow(g, PAD_L, below, plotW); below += p.extra; }
+
+    hourLabels(g, PAD_L, below, plotW);
+    dayBand(g, PAD_L, below + HOUR_ROW, plotW);
+  });
+
+  const ov = document.getElementById('overlay');
+  ov.width = cv.width; ov.height = cv.height; ov.style.height = cv.style.height;
+
+  layout = { padL: PAD_L, plotW, tops: panelTops, panelH };
+  drawBand();
+}
+
+/* Rain inside the cloud panel, Windy style: a shallow band at the foot of the
+   plot with the amount labelled above the bar. Bar height is square-rooted so
+   a trace of drizzle stays visible next to a downpour; the label carries the
+   actual number, so the bar only has to rank them. */
+function rainBars(g, x, top, w, h) {
+  const n = grid.n;
+  const band = Math.round(h * RAIN_BAND_FRAC);
+  const base = top + h;
+
+  let pmax = 0;
+  for (let i = 0; i < n; i++) if (grid.precip[i] > pmax) pmax = grid.precip[i];
+  if (pmax <= 0.02) return;
+
+  const visN = Math.max(1, (n - 1) * (viewT[1] - viewT[0]));
+  const bw = Math.max(2, (w/visN) * 0.7);
+  const barH = mm => Math.max(1, band * Math.min(1, mm / RAIN_CEILING));
+
+  // Mark what full height means, otherwise the scale is unreadable.
+  const capY = base - band;
+  g.strokeStyle = 'rgba(0,64,255,0.35)'; g.lineWidth = 1; g.setLineDash([3, 3]);
+  g.beginPath(); g.moveTo(x, capY + .5); g.lineTo(x + w, capY + .5); g.stroke();
+  g.setLineDash([]);
+  g.font = F_ISO; g.textAlign = 'left'; g.textBaseline = 'bottom';
+  g.fillStyle = 'rgba(0,64,255,0.75)';
+  g.fillText(RAIN_CEILING + ' mm/h', x + 4, capY - 2);
+
+  for (let i = 0; i < n; i++) {
+    const mm = grid.precip[i];
+    if (mm <= 0.02) continue;
+    const cx = xAtT(i/(n-1));
+    g.fillStyle = grid.snow[i] > 0 ? SNOW_FILL : RAIN_BLUE;
+    if (cx >= x - bw && cx <= x + w + bw) g.fillRect(cx - bw/2, base - barH(mm), bw, barH(mm));
+  }
+
+  // Label the peaks only, thinned so they never collide.
+  g.font = F_ISO; g.textAlign = 'center'; g.textBaseline = 'alphabetic';
+  const placed = [];
+  for (let i = 0; i < n; i++) {
+    const mm = grid.precip[i];
+    if (mm < 0.1) continue;
+    const prev = i > 0 ? grid.precip[i-1] : 0;
+    const next = i < n-1 ? grid.precip[i+1] : 0;
+    if (mm < prev || mm < next) continue;
+    const cx = xAtT(i/(n-1));
+    if (placed.some(p => Math.abs(p - cx) < 40)) continue;
+    const txt = (mm < 10 ? mm.toFixed(1) : String(Math.round(mm))) + 'mm';
+    const tw = g.measureText(txt).width;
+    const ty = base - barH(mm) - 3;
+    g.fillStyle = 'rgba(255,255,255,0.86)';
+    g.fillRect(cx - tw/2 - 3, ty - 10, tw + 6, 12);
+    g.fillStyle = RAIN_BLUE;
+    g.fillText(txt, cx, ty);
+    placed.push(cx);
+  }
+}
+
+/* Mid and high cloud as shaded strips above the panel.
+
+   These are the model's aggregate layer fractions, not a cross-section — the
+   chart's axis stops a couple of thousand metres up and cirrus lives near
+   twelve. Drawn with the same cloud ramp as the panel, so the Windy /
+   Meteoblue toggle governs them too, and interpolated between hours to match
+   the panel rather than showing hourly steps. */
+function cloudStrips(g, x, y, w) {
+  const rows = [['High', grid.cloudHigh], ['Mid', grid.cloudMid]];
+  g.setLineDash([]);
+
+  rows.forEach(([label, arr], k) => {
+    if (!arr) return;
+    const top = y + k*CLOUD_STRIP, hgt = CLOUD_STRIP - 3;
+
+    for (let px = 0; px < w; px++) {
+      const raw = tAtPx(px) * (grid.n - 1);
+      const i = Math.max(0, Math.min(grid.n - 2, Math.floor(raw)));
+      const f = Math.max(0, Math.min(1, raw - i));
+      const v = arr[i]*(1 - f) + arr[i+1]*f;
+      const c = cloudRamp(v);
+      g.fillStyle = `rgb(${Math.round(c[0])},${Math.round(c[1])},${Math.round(c[2])})`;
+      g.fillRect(x + px, top, 1, hgt);
+    }
+
+    g.font = F_HOUR; g.textAlign = 'right'; g.textBaseline = 'middle';
+    g.fillStyle = INK_FADED;
+    g.fillText(label, x - 8, top + hgt/2);
+    g.strokeStyle = 'rgba(0,0,0,.28)'; g.lineWidth = 1;
+    g.strokeRect(x + .5, top + .5, w - 1, hgt - 1);
+  });
+}
+
+/* Cloud base in metres beneath the panel, as Windy prints it. Clear hours show
+   "--" because the model reports no base at all, not a base of zero. */
+function cloudBaseRow(g, x, y, w) {
+  const st = hourStep(w);
+  const t0 = grid.times[0].getTime(), span = grid.times[grid.n-1].getTime() - t0;
+
+  g.setLineDash([]);
+  g.fillStyle = '#fff'; g.fillRect(x, y, w, CLOUDBASE_ROW);
+  g.strokeStyle = 'rgba(0,0,0,.2)'; g.lineWidth = 1;
+  g.strokeRect(x + .5, y + .5, w - 1, CLOUDBASE_ROW - 1);
+
+  g.font = F_HOUR; g.textAlign = 'right'; g.textBaseline = 'middle';
+  g.fillStyle = INK_FADED;
+  g.fillText('base', x - 8, y + CLOUDBASE_ROW/2);
+
+  g.textAlign = 'center';
+  for (let i = 0; i < grid.n; i++) {
+    const d = grid.times[i];
+    if (d.getHours() % st !== 0) continue;
+    const px = xAtT((d.getTime() - t0)/span);
+    if (px < x + 14 || px > x + w - 14) continue;
+    const v = grid.cloudBase ? grid.cloudBase[i] : null;
+    g.fillStyle = v == null ? 'rgba(0,0,0,0.28)' : INK;
+    g.fillText(v == null ? '--' : String(Math.round(v)), px, y + CLOUDBASE_ROW/2);
+  }
+}
+
+function paint(g, f, ramp, x, y, w, h) {
+  const off = document.createElement('canvas'); off.width = w; off.height = h;
+  const oc = off.getContext('2d'), img = oc.createImageData(w, h), d = img.data;
+  for (let k = 0; k < w * h; k++) {
+    const c = ramp(f[k]);
+    d[k*4] = c[0]; d[k*4+1] = c[1]; d[k*4+2] = c[2]; d[k*4+3] = 255;
+  }
+  oc.putImageData(img, 0, 0); g.drawImage(off, x, y);
+}
+
+function night(g, x, top, w, h) {
+  g.fillStyle = NIGHT_FILL; g.setLineDash([]);
+  for (const [a, b] of grid.nights) {
+    const xa = xAtT(a), xb = xAtT(b);
+    if (xb < x || xa > x + w) continue;
+    const l = Math.max(xa, x), r = Math.min(xb, x + w);
+    g.fillRect(l, top, r - l, h);
+  }
+}
+
+function gridlines(g, x, top, w, h) {
+  const t0 = grid.times[0].getTime(), span = grid.times[grid.n-1].getTime() - t0;
+  const fx = d => (d - t0) / span;
+  g.setLineDash(GRID_DASH);
+
+  g.strokeStyle = GRID_MINOR; g.lineWidth = 0.5;
+  g.beginPath();
+  for (let i = 0; i < grid.n; i++) {
+    const hr = grid.times[i].getHours();
+    if (hr % 6 === 0 && hr !== 0) {
+      const px = Math.round(xAtT(fx(grid.times[i].getTime()))) + .5;
+      if (px >= x && px <= x + w) { g.moveTo(px, top); g.lineTo(px, top + h); }
+    }
+  }
+  const [hA, hB] = hSpan(), hRange = hB - hA;
+  const minorStep = hRange <= 800 ? 50 : hRange <= 1500 ? 100 : hRange <= 2500 ? 250 : 500;
+  for (let hv = Math.ceil(hA/minorStep)*minorStep; hv < hB; hv += minorStep) {
+    if (hv % (minorStep*2) === 0) continue;
+    const py = Math.round(yAtH(hv, top)) + .5;
+    g.moveTo(x, py); g.lineTo(x + w, py);
+  }
+  g.stroke();
+
+  const majorStep = minorStep * 2;
+  g.strokeStyle = GRID_MAJOR; g.lineWidth = 1;
+  g.beginPath();
+  for (let hv = Math.ceil(hA/majorStep)*majorStep; hv < hB; hv += majorStep) {
+    const py = Math.round(yAtH(hv, top)) + .5;
+    g.moveTo(x, py); g.lineTo(x + w, py);
+  }
+  g.stroke();
+  g.setLineDash([]);
+
+  // Day boundaries: solid and darker, so they read as structure rather than
+  // as one more gridline.
+  g.strokeStyle = GRID_DAY; g.lineWidth = 1.5;
+  g.beginPath();
+  for (let i = 0; i < grid.n; i++) {
+    if (grid.times[i].getHours() === 0) {
+      const px = Math.round(xAtT(fx(grid.times[i].getTime()))) + .5;
+      if (px >= x && px <= x + w) { g.moveTo(px, top); g.lineTo(px, top + h); }
+    }
+  }
+  g.stroke();
+}
+
+function extent(f) {
+  let lo = Infinity, hi = -Infinity;
+  for (let k = 0; k < f.length; k++) { if (f[k] < lo) lo = f[k]; if (f[k] > hi) hi = f[k]; }
+  return [lo, hi];
+}
+
+/* Chain marching-squares segments into continuous polylines so labels can be
+   spaced along the line and the line can be broken to make room for them. */
+function chain(segs) {
+  const key = p => Math.round(p[0]*2) + ',' + Math.round(p[1]*2);
+  const map = new Map();
+  const nSeg = segs.length / 2;
+  const used = new Uint8Array(nSeg);
+  for (let i = 0; i < segs.length; i += 2) {
+    for (const p of [segs[i], segs[i+1]]) {
+      const k = key(p);
+      if (!map.has(k)) map.set(k, []);
+      map.get(k).push(i);
+    }
+  }
+  const lines = [];
+  for (let i = 0; i < segs.length; i += 2) {
+    if (used[i/2]) continue;
+    used[i/2] = 1;
+    let line = [segs[i], segs[i+1]];
+    for (let pass = 0; pass < 2; pass++) {
+      let guard = 0;
+      while (guard++ < 100000) {
+        const end = line[line.length - 1];
+        const cands = map.get(key(end));
+        if (!cands) break;
+        let nx = -1;
+        for (const c of cands) if (!used[c/2]) { nx = c; break; }
+        if (nx < 0) break;
+        used[nx/2] = 1;
+        const p1 = segs[nx], p2 = segs[nx+1];
+        line.push(key(p1) === key(end) ? p2 : p1);
+      }
+      line.reverse();
+    }
+    if (line.length > 1) lines.push(line);
+  }
+  return lines;
+}
+
+/* Walk a polyline by arc length, dropping a label every LABEL_SPACING px. */
+function labelPoints(line, w, h, offset) {
+  const pts = []; let acc = offset;
+  for (let i = 1; i < line.length; i++) {
+    const dx = line[i][0] - line[i-1][0], dy = line[i][1] - line[i-1][1];
+    acc += Math.hypot(dx, dy);
+    if (acc >= LABEL_SPACING) {
+      acc = 0;
+      const p = line[i];
+      if (p[0] > 16 && p[0] < w - 16 && p[1] > 10 && p[1] < h - 10) pts.push(p);
+    }
+  }
+  return pts;
+}
+
+function strokeBroken(g, line, marks, x0, y0) {
+  let pen = false;
+  g.beginPath();
+  for (const p of line) {
+    let near = false;
+    for (const m of marks)
+      if (Math.abs(m[0] - p[0]) < LABEL_GAP && Math.abs(m[1] - p[1]) < 7) { near = true; break; }
+    if (near) { pen = false; continue; }
+    if (!pen) { g.moveTo(x0 + p[0], y0 + p[1]); pen = true; }
+    else g.lineTo(x0 + p[0], y0 + p[1]);
+  }
+  g.stroke();
+}
+
+/* Every isoline gets labelled, repeatedly along its length, as WindGuru does. */
+function isolines(g, f, w, h, x0, y0, step, emph) {
+  const [lo, hi] = extent(f);
+  const marksAll = [];
+  const draws = [];
+
+  let idx = 0;
+  for (let lv = Math.ceil(lo/step)*step; lv <= hi; lv += step, idx++) {
+    const lines = chain(contourSegments(f, w, h, lv, CONTOUR_CELL));
+    const strong = ISO_EMPHASIS && Math.round(lv/step) % emph === 0;
+    for (const line of lines) {
+      // Stagger the starting offset per level so labels do not line up in columns.
+      const marks = labelPoints(line, w, h, (idx % 3) * (LABEL_SPACING / 3));
+      const keep = [];
+      for (const m of marks) {
+        let clash = false;
+        for (const o of marksAll)
+          if (Math.abs(o[0]-m[0]) < 16 && Math.abs(o[1]-m[1]) < 11) { clash = true; break; }
+        if (!clash) { keep.push(m); marksAll.push(m); }
+      }
+      draws.push({ line, marks: keep, lv, strong });
+    }
+  }
+
+  g.lineCap = 'round'; g.lineJoin = 'round'; g.setLineDash([]);
+  for (const d of draws) {
+    g.strokeStyle = d.strong ? ISO_MAJOR : ISO_COLOUR;
+    g.lineWidth = d.strong ? 1.4 : ISO_WIDTH;
+    strokeBroken(g, d.line, d.marks, x0, y0);
+  }
+
+  g.font = F_ISO; g.fillStyle = 'rgba(0,0,0,0.8)';
+  g.textAlign = 'center'; g.textBaseline = 'middle';
+  for (const d of draws)
+    for (const m of d.marks)
+      g.fillText(String(d.lv), x0 + m[0], y0 + m[1]);
+}
+
+function freezingLine(g, tF, w, h, x0, y0) {
+  const segs = contourSegments(tF, w, h, 0, CONTOUR_CELL);
+  if (!segs.length) return;
+  g.strokeStyle = 'rgba(0,0,0,0.95)'; g.lineWidth = 2.2;
+  g.lineCap = 'round'; g.lineJoin = 'round'; g.setLineDash([]);
+  g.beginPath();
+  for (let i = 0; i + 1 < segs.length; i += 2) {
+    g.moveTo(x0 + segs[i][0], y0 + segs[i][1]);
+    g.lineTo(x0 + segs[i+1][0], y0 + segs[i+1][1]);
+  }
+  g.stroke();
+}
+
+/* WindGuru's arrow on a regular lattice, fading out in light wind. */
+function arrows(g, x, top, w, h) {
+  g.setLineDash([]);
+  for (let px = ARROW_DX/2; px < w; px += ARROW_DX) {
+    const col = columnAt(grid, tAtPx(px));
+    for (let py = ARROW_DY/2; py < h; py += ARROW_DY) {
+      const hv = hAtPy(py);
+      const ms = atHeight(col, col.wind, hv);
+      const a = arrowAlpha(ms);
+      if (a <= 0.02) continue;
+      const dir = atHeight(col, col.dir, hv);
+      g.save();
+      g.translate(x + px, top + py);
+      g.rotate((dir + 180) * Math.PI / 180);
+      const s = ARROW_SIZE / 100;
+      g.scale(s, s);
+      g.translate(-50, -45);
+      g.globalAlpha = a;
+      g.fillStyle = '#000';
+      g.fill(ARROW_PATH);
+      g.restore();
+    }
+  }
+  g.globalAlpha = 1;
+}
+
+/* Two terrain references: the height at the chosen point, which for a summit
+   pin is the peak, and the trailhead. The trailhead defaults to the lowest
+   ground within 5 km and can be typed over. Together they bracket the climb,
+   so you can see which slice of the profile you actually pass through. */
+function groundLine(g, x, top, w, h) {
+  const yOf = m => yAtH(m, top);
+  const peak = grid.elevation;
+  const th = trailheadValue();
+
+  g.font = F_ISO; g.textBaseline = 'bottom'; g.textAlign = 'right';
+
+  if (th != null && th >= hSpan()[0] && th <= hSpan()[1]) {
+    const y = yOf(th);
+    g.strokeStyle = '#9a7b52'; g.lineWidth = 1.5; g.setLineDash([3, 3]);
+    g.beginPath(); g.moveTo(x, y); g.lineTo(x + w, y); g.stroke();
+    g.setLineDash([]);
+    g.fillStyle = '#8a6a42';
+    g.fillText('trailhead ' + Math.round(th) + ' m', x + w - 6, y - 3);
+  }
+
+  if (peak != null && peak >= hSpan()[0] && peak <= hSpan()[1]) {
+    const y = yOf(peak);
+    g.strokeStyle = '#7a4b1e'; g.lineWidth = 2; g.setLineDash([7, 4]);
+    g.beginPath(); g.moveTo(x, y); g.lineTo(x + w, y); g.stroke();
+    g.setLineDash([]);
+    g.fillStyle = '#7a4b1e';
+    g.fillText(Math.round(peak) + ' m', x + w - 6, y - 3);
+  }
+}
+
+/* Typed value wins; otherwise the 5 km minimum. */
+function trailheadValue() {
+  const raw = document.getElementById('trailhead').value;
+  if (raw !== '' && !isNaN(+raw)) return +raw;
+  return grid && grid.terrainMin != null ? grid.terrainMin : null;
+}
+
+function yAxis(g, x, top, h) {
+  const [hA, hB] = hSpan(), range = hB - hA;
+  const step = range <= 400 ? 50 : range <= 800 ? 100 : range <= 1500 ? 250
+             : range <= 2500 ? 500 : 1000;
+  g.font = F_AXIS;
+  g.textAlign = 'right'; g.textBaseline = 'middle';
+  g.strokeStyle = 'rgba(0,0,0,.45)'; g.lineWidth = 1; g.setLineDash([]);
+  for (let hv = Math.ceil(hA/step)*step; hv <= hB; hv += step) {
+    const y = yAtH(hv, top);
+    g.beginPath(); g.moveTo(x - 5, y); g.lineTo(x, y); g.stroke();
+    g.fillStyle = INK; g.fillText(String(hv), x - 8, y);
+  }
+}
+
+function hourStep(w) {
+  const full = (grid.times[grid.n-1] - grid.times[0]) / 3600000;
+  const hours = full * (viewT[1] - viewT[0]);
+  const pxPerHour = w / hours;
+  for (const st of [HOUR_INCREMENT, 6, 12, 24]) if (st * pxPerHour >= 26) return st;
+  return 24;
+}
+
+/* Hour ticks: 10px, black at 0.5 alpha, every 3 hours where they fit. */
+function hourLabels(g, x, y, w) {
+  const st = hourStep(w);
+  const t0 = grid.times[0].getTime(), span = grid.times[grid.n-1].getTime() - t0;
+  g.font = F_HOUR; g.fillStyle = INK_FADED;
+  g.textAlign = 'center'; g.textBaseline = 'middle'; g.setLineDash([]);
+  for (let i = 0; i < grid.n; i++) {
+    const d = grid.times[i];
+    if (d.getHours() % st !== 0) continue;
+    const px = xAtT((d.getTime() - t0)/span);
+    if (px < x + 11 || px > x + w - 11) continue;
+    g.fillText(d.getHours() + 'h', px, y + HOUR_ROW/2);
+  }
+}
+
+function dayBounds() {
+  const t0 = grid.times[0].getTime(), span = grid.times[grid.n-1].getTime() - t0;
+  const b = [0];
+  for (let i = 1; i < grid.n; i++)
+    if (grid.times[i].getHours() === 0) b.push((grid.times[i].getTime() - t0)/span);
+  b.push(1);
+  return b;
+}
+
+/* Day band: alternating #d5d5d5 / #f4f4f4, label "Sun 26 Jul 2026",
+   shortened progressively when the band is too narrow. */
+function dayBand(g, x, y, w) {
+  const bounds = dayBounds();
+  g.font = F_DAY; g.textAlign = 'center'; g.textBaseline = 'middle'; g.setLineDash([]);
+
+  for (let i = 0; i < bounds.length - 1; i++) {
+    let a = xAtT(bounds[i]), b = xAtT(bounds[i+1]);
+    if (b < x || a > x + w) continue;
+    a = Math.max(a, x); b = Math.min(b, x + w);
+    g.fillStyle = i % 2 ? BAND_B : BAND_A;
+    g.fillRect(a, y + 2, b - a, DAY_ROW - 4);
+
+    const d = grid.times[Math.round(((bounds[i] + bounds[i+1])/2)*(grid.n - 1))];
+    const wd = d.toLocaleDateString('en-GB', { weekday: 'short' });
+    const mo = d.toLocaleDateString('en-GB', { month: 'short' });
+    const dd = String(d.getDate()).padStart(2, '0');
+    const options = [`${wd} ${dd} ${mo} ${d.getFullYear()}`, `${wd} ${dd} ${mo}`, `${wd} ${dd}`, wd];
+    g.fillStyle = INK;
+    for (const txt of options) {
+      if (b - a > g.measureText(txt).width + 8) {
+        g.fillText(txt, (a + b)/2, y + 2 + (DAY_ROW - 4)/2);
+        break;
+      }
+    }
+  }
+}
+
+/* ---------- drag to zoom ------------------------------------------------
+
+   The rubber band lives on its own canvas. Redrawing the chart on every
+   pointermove is not viable — a full draw runs marching squares over three
+   fields plus a box blur — so only the overlay repaints while dragging.
+
+   A drag wider than it is tall zooms time only; taller than wide zooms
+   height only; a real box does both. That stops a sloppy horizontal swipe
+   from silently cropping the height axis too. Time zoom still applies to
+   all three panels, because they share a time axis — the box just marks
+   what was dragged rather than previewing that.                          */
+
+let drag = null;
+const DRAG_MIN = 12;          // px before an axis counts as selected
+
+function bandGeom() {
+  const xa = Math.min(drag.x0, drag.x1), xb = Math.max(drag.x0, drag.x1);
+  const ya = Math.min(drag.y0, drag.y1), yb = Math.max(drag.y0, drag.y1);
+  return { xa, xb, ya, yb, dx: xb - xa, dy: yb - ya };
+}
+
+function drawBand() {
+  const ov = document.getElementById('overlay');
+  if (!ov || !ov.getContext || !ov.width) return;
+  const dpr = Math.min(2, window.devicePixelRatio || 1);
+  const g = ov.getContext('2d');
+  g.setTransform(dpr, 0, 0, dpr, 0, 0);
+  g.clearRect(0, 0, ov.width/dpr, ov.height/dpr);
+  if (!drag || !layout) return;
+
+  const { xa, xb, ya, yb, dx, dy } = bandGeom();
+  if (dx < 2 && dy < 2) return;
+
+  g.fillStyle = 'rgba(55,138,221,0.12)';
+  g.fillRect(xa, ya, xb - xa, yb - ya);
+  g.strokeStyle = 'rgba(55,138,221,0.85)'; g.lineWidth = 1; g.setLineDash([4,3]);
+  g.strokeRect(Math.round(xa) + .5, Math.round(ya) + .5,
+               Math.max(1, xb - xa), Math.max(1, yb - ya));
+  g.setLineDash([]);
+}
+
+function applyZoom() {
+  const { xa, xb, ya, yb, dx, dy } = bandGeom();
+  if (dx < DRAG_MIN && dy < DRAG_MIN) return;      // a click, not a drag
+
+  const L = layout.padL, W = layout.plotW, top = drag.top, PH = layout.panelH;
+  let nextT = viewT, nextH = viewH;
+
+  // Both are read from the current view before either is changed.
+  if (dx >= DRAG_MIN) {
+    const a = tAtPx(clamp(xa, L, L + W) - L);
+    const b = tAtPx(clamp(xb, L, L + W) - L);
+    if (b - a > 0.002) nextT = [Math.max(0, a), Math.min(1, b)];
+  }
+  if (dy >= DRAG_MIN) {
+    const hi = hAtPy(clamp(ya, top, top + PH) - top);
+    const lo = hAtPy(clamp(yb, top, top + PH) - top);
+    if (hi - lo > 25) nextH = [Math.max(0, lo), hi];
+  }
+  viewT = nextT; viewH = nextH;
+  draw(); zoomUI();
+}
+
+function resetZoom() { viewT = [0, 1]; viewH = null; draw(); zoomUI(); }
+
+function zoomUI() {
+  const btn = document.getElementById('zoomout');
+  const info = document.getElementById('zoominfo');
+  if (!btn || !info) return;
+  btn.hidden = !isZoomed();
+  if (!isZoomed() || !grid) {
+    info.textContent = 'Drag across the chart to zoom \u00b7 double-click to reset';
+    return;
+  }
+  const t0 = grid.times[0].getTime(), span = grid.times[grid.n-1].getTime() - t0;
+  const fmt = f => new Date(t0 + f*span)
+    .toLocaleString('en-GB', { weekday:'short', hour:'2-digit', minute:'2-digit' });
+  const [a,b] = hSpan();
+  info.textContent = `${fmt(viewT[0])} to ${fmt(viewT[1])}`
+    + (viewH ? ` \u00b7 ${Math.round(a)}\u2013${Math.round(b)} m` : '');
+}
+
+(function wireZoom() {
+  const cv = document.getElementById('chart');
+  if (!cv) return;
+  cv.addEventListener('pointerdown', ev => {
+    if (!layout || !grid) return;
+    const r = cv.getBoundingClientRect();
+    const x = ev.clientX - r.left, y = ev.clientY - r.top;
+    const top = layout.tops.find(t => y >= t && y <= t + layout.panelH);
+    if (top === undefined || x < layout.padL || x > layout.padL + layout.plotW) return;
+    drag = { x0:x, y0:y, x1:x, y1:y, top };
+    try { cv.setPointerCapture(ev.pointerId); } catch (e) {}
+  });
+  cv.addEventListener('pointermove', ev => {
+    if (!drag) return;
+    const r = cv.getBoundingClientRect();
+    drag.x1 = ev.clientX - r.left;
+    drag.y1 = ev.clientY - r.top;
+    drawBand();
+  });
+  cv.addEventListener('pointerup', () => {
+    if (!drag) return;
+    applyZoom();
+    drag = null;
+    drawBand();
+  });
+  cv.addEventListener('pointercancel', () => { drag = null; drawBand(); });
+  cv.addEventListener('dblclick', resetZoom);
+  document.getElementById('zoomout').addEventListener('click', resetZoom);
+  document.addEventListener('keydown', e => { if (e.key === 'Escape' && isZoomed()) resetZoom(); });
+})();
+
+/* ---------- hover ------------------------------------------------------- */
+
+const DIRS = ['N','NNE','NE','ENE','E','ESE','SE','SSE','S','SSW','SW','WSW','W','WNW','NW','NNW'];
+
+document.getElementById('chart').addEventListener('pointermove', ev => {
+  if (!layout || !grid) return;
+  const r = ev.currentTarget.getBoundingClientRect();
+  const x = ev.clientX - r.left, y = ev.clientY - r.top;
+  const top = layout.tops.find(t => y >= t && y <= t + layout.panelH);
+  const out = document.getElementById('readout');
+  if (top === undefined || x < layout.padL || x > layout.padL + layout.plotW) { out.innerHTML = ''; return; }
+
+  const fx = tAtPx(x - layout.padL);
+  const hv = hAtPy(y - top);
+  const col = columnAt(grid, fx);
+  const iHour = Math.round(fx*(grid.n - 1));
+  const t = grid.times[iHour];
+  const deg = atHeight(col, col.dir, hv);
+  out.innerHTML =
+    `<span><span class="k">at</span> ${t.toLocaleString(undefined,{weekday:'short',hour:'2-digit',minute:'2-digit'})}</span>`
+  + `<span><span class="k">height</span> ${Math.round(hv/10)*10} m</span>`
+  + `<span><span class="k">wind</span> ${toKmh(atHeight(col,col.wind,hv)).toFixed(0)} km/h ${DIRS[Math.round(deg/22.5)%16]}</span>`
+  + `<span><span class="k">temp</span> ${atHeight(col,col.temp,hv).toFixed(1)} \u00B0C</span>`
+  + `<span><span class="k">cloud</span> ${Math.round(atHeight(col,col.cloud,hv))}% here`
+  + `, mid ${Math.round(grid.cloudMid ? grid.cloudMid[iHour] : 0)}%`
+  + `, high ${Math.round(grid.cloudHigh ? grid.cloudHigh[iHour] : 0)}%</span>`
+  + `<span><span class="k">precip</span> ${grid.precip[iHour].toFixed(1)} mm${grid.snow[iHour] > 0 ? ' (snow)' : ''} · ${Math.round(grid.prob[iHour])}%</span>`
+  + `<span><span class="k">base</span> ${grid.cloudBase && grid.cloudBase[iHour] != null ? Math.round(grid.cloudBase[iHour]) + ' m' : '--'}</span>`;
+});
+document.getElementById('chart').addEventListener('pointerleave',
+  () => document.getElementById('readout').innerHTML = '');
+
+/* ---------- wiring ------------------------------------------------------ */
+
+function legends() {
+  document.getElementById('legWind').innerHTML = '<b>Wind km/h</b>' +
+    windStops.slice(1, 9).map(s => `<span><i style="background:${css(s)}"></i>${s[0]}</span>`).join('');
+  document.getElementById('legTemp').innerHTML = '<b>Temp &deg;C</b>' +
+    tempStops.slice(1, 6).map(s => `<span><i style="background:${css(s)}"></i>${s[0]}</span>`).join('')
+    + '<span><i class="ln"></i>Freezing level</span>'
+    + '<span><i class="dash"></i>Ground here</span>'
+    + '<span><i class="night"></i>Night</span>'
+    + '<span>Arrows show where the wind is blowing to, fading out below ~4 km/h</span>';
+  const sw = cloudStyle === 'windy'
+    ? [['rgb(223,223,223)','25%'],['rgb(191,191,191)','50%'],
+       ['rgb(159,159,159)','75%'],['rgb(130,130,130)','100%']]
+    : [['#d2d2d2','10-25%'],['#b1b1b1','25-50%'],['#929292','50-75%'],
+       ['#737373','75-90%'],['#565656','90-100%']];
+  document.getElementById('legCloud').innerHTML = '<b>Cloud</b>'
+    + sw.map(([c,l]) => `<span><i style="background:${c}"></i>${l}</span>`).join('')
+    + '<span style="margin-left:6px"><i style="background:rgb(0,64,255)"></i>Rain (mm/h)</span>'
+    + '<span><i style="background:#7fb4e8"></i>Snow</span>'
+    + `<span>Rain bars linear to ${RAIN_CEILING} mm/h, then clipped</span>`
+    + `<span>Cloud base = lowest level with &ge;${CLOUD_BASE_PCT}% cloud; &ldquo;--&rdquo; means none</span>`
+    + '<span>Mid and high strips are layer totals, not resolved by height</span>';
+}
+
+const $ = id => document.getElementById(id);
+let resizeTimer = null, loadTimer = null, loadSeq = 0;
+
+/* ---------- request cache -----------------------------------------------
+
+   Keyed on rounded position plus model and day count. Coordinates are rounded
+   to 3 decimals (~110 m), far finer than any model grid, so nudging the map
+   pin re-uses the same result instead of issuing a fresh request.
+
+   The forecast itself only updates a few times a day, so a 30 minute lifetime
+   costs nothing in accuracy. This cache is in memory only — moving the calls
+   behind your own server would use exactly the same key and lifetime, just
+   backed by a store that survives a reload, and would then serve every user
+   from one upstream request per key.                                       */
+
+const CACHE_TTL = 30 * 60 * 1000;
+const cache = new Map();
+const cacheKey = (lat, lon, model, days) =>
+  [(+lat).toFixed(3), (+lon).toFixed(3), model, days, blendCells ? 'b' : 'n'].join('|');
+
+async function getGrid(lat, lon, model, days) {
+  const key = cacheKey(lat, lon, model, days);
+  const hit = cache.get(key);
+  if (hit && Date.now() - hit.at < CACHE_TTL) return { grid: hit.grid, cached: true };
+  const g = await fetchGrid(lat, lon, model, days);
+  cache.set(key, { at: Date.now(), grid: g });
+  return { grid: g, cached: false };
+}
+
+/* Anything that needs new data goes through here, so a burst of changes
+   collapses into a single request. */
+function scheduleLoad() {
+  clearTimeout(loadTimer);
+  loadTimer = setTimeout(load, 350);
+}
+
+$('place').addEventListener('change', e => {
+  if (e.target.value === 'custom') return;
+  const [la, lo] = e.target.value.split(',');
+  $('lat').value = la; $('lon').value = lo;
+  load();
+});
+for (const id of ['lat', 'lon', 'model', 'days', 'blend']) {
+  $(id).addEventListener('change', scheduleLoad);
+  $(id).addEventListener('input', scheduleLoad);
+}
+$('trailhead').addEventListener('input', () => { if (grid) draw(); });
+$('top').addEventListener('change', () => { axisTop = +$('top').value; draw(); });
+$('size').addEventListener('change', () => { panelH = +$('size').value; draw(); });
+$('arrows').addEventListener('change', () => { showArrows = $('arrows').value === '1'; draw(); });
+window.addEventListener('resize', () => {
+  clearTimeout(resizeTimer);
+  resizeTimer = setTimeout(draw, 150);
+});
+
+async function load() {
+  const st = $('status');
+  const seq = ++loadSeq;
+  st.className = 'status'; st.textContent = 'Loading…';
+  try {
+    axisTop = +$('top').value;
+    panelH  = +$('size').value;
+    blendCells = $('blend').value === '1';
+    showArrows = $('arrows').value === '1';
+    const prevCell = grid ? grid.cellLat + ',' + grid.cellLon : null;
+    const res = await getGrid($('lat').value, $('lon').value, $('model').value, $('days').value);
+    if (seq !== loadSeq) return;          // a newer request has overtaken this one
+    grid = res.grid;
+    if (!$('trailhead').value && grid.terrainMin != null)
+      $('trailhead').placeholder = Math.round(grid.terrainMin);
+
+    /* Small moves usually land in the same model cell, and then the panels are
+       genuinely identical — worth saying so, because otherwise it looks like a
+       refresh that failed. */
+    const sameCell = prevCell !== null && prevCell === grid.cellLat + ',' + grid.cellLon;
+    const dKm = (111.32 * Math.hypot(grid.cellLat - +$('lat').value,
+                 (grid.cellLon - +$('lon').value) * Math.cos(grid.cellLat*Math.PI/180))).toFixed(1);
+    const inBand = grid.levels.filter((L, i) => grid.heights[i*grid.n] <= axisTop);
+
+    st.innerHTML = `${grid.model} &middot; cell ${grid.cellLat.toFixed(3)}, ${grid.cellLon.toFixed(3)} `
+      + `(${dKm} km away)`
+      + (grid.cellsUsed > 1 ? ` &middot; blending ${grid.cellsUsed} cells above 925 hPa` : '')
+      + (sameCell ? ' <b>&mdash; same cell as before, so the panels are unchanged</b>' : '')
+      + ` &middot; point ${Math.round(grid.elevation)} m`
+      + (grid.terrainMin != null ? ` &middot; lowest within 5 km ${Math.round(grid.terrainMin)} m` : '')
+      + ` &middot; ${inBand.length} levels below ${axisTop} m`
+      + (res.cached ? ' &middot; from cache' : '');
+    $('note').textContent =
+      'The model does not resolve individual peaks — at this resolution the mountain is largely '
+      + 'smoothed away, so this shows the free-atmosphere column above the area rather than airflow '
+      + 'over the ridge itself. Expect it to miss lee waves, upslope acceleration and local funnelling. '
+      + 'The dashed line is ground level at the point you chose; below it the model is describing air '
+      + 'that in reality is inside the mountain. '
+      + 'Wind, temperature and cloud are pressure-level fields, constant across a whole model cell '
+      + '(about 13 km on GFS, 28 km on ICON and ECMWF), so moving the pin a short distance changes '
+      + 'the terrain lines and elevation but not the panels themselves. The cell in use is shown above.';
+    draw();
+  } catch (err) {
+    if (seq !== loadSeq) return;
+    st.className = 'status err';
+    st.textContent = 'Failed: ' + err.message
+      + '. If this says "Failed to fetch" and you opened the file directly, serve the folder instead.';
+  }
+}
+
+/* ---------- saved locations and the map picker -------------------------- */
+
+let memFavs = [];   // fallback when localStorage is unavailable
+
+function readFavs() {
+  try { return JSON.parse(localStorage.getItem('vp_favs') || '[]'); }
+  catch (e) { return memFavs; }
+}
+function writeFavs(list) {
+  memFavs = list;
+  try { localStorage.setItem('vp_favs', JSON.stringify(list)); } catch (e) {}
+}
+function renderFavs(selectValue) {
+  const sel = $('place');
+  const old = sel.querySelector('optgroup[data-favs]');
+  if (old) old.remove();
+  const favs = readFavs();
+  if (favs.length) {
+    const grp = document.createElement('optgroup');
+    grp.label = 'Saved'; grp.setAttribute('data-favs', '1');
+    for (const f of favs) {
+      const o = document.createElement('option');
+      o.value = `${f.lat},${f.lon}`;
+      o.textContent = f.elev != null ? `${f.name} (${Math.round(f.elev)} m)` : f.name;
+      grp.appendChild(o);
+    }
+    sel.insertBefore(grp, sel.querySelector('option[value="custom"]'));
+  }
+  if (selectValue) sel.value = selectValue;
+}
+
+let pickMap = null, pickMarker = null, picked = null;
+
+function openPicker() {
+  if (typeof L === 'undefined') {
+    $('pickInfo').textContent = 'Map library did not load — check your connection.';
+    $('pickModal').hidden = false;
+    return;
+  }
+  $('pickModal').hidden = false;
+  if (!pickMap) {
+    pickMap = L.map('vp-map').setView([+$('lat').value, +$('lon').value], 9);
+    L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png',
+      { maxZoom: 17, attribution: '&copy; OpenStreetMap contributors' }).addTo(pickMap);
+    pickMap.on('click', onPick);
+  } else {
+    pickMap.setView([+$('lat').value, +$('lon').value], pickMap.getZoom());
+  }
+  setTimeout(() => pickMap.invalidateSize(), 80);
+}
+
+async function onPick(ev) {
+  const lat = +ev.latlng.lat.toFixed(5), lon = +ev.latlng.lng.toFixed(5);
+  picked = { lat, lon, elev: null };
+  if (pickMarker) pickMarker.setLatLng(ev.latlng);
+  else pickMarker = L.marker(ev.latlng).addTo(pickMap);
+
+  $('pickInfo').textContent = `${lat}, ${lon} — looking up elevation…`;
+  try {
+    const j = await (await fetch(
+      `https://api.open-meteo.com/v1/elevation?latitude=${lat}&longitude=${lon}`)).json();
+    picked.elev = Array.isArray(j.elevation) ? j.elevation[0] : null;
+  } catch (e) { picked.elev = null; }
+
+  $('pickInfo').textContent = `${lat}, ${lon} — `
+    + (picked.elev == null ? 'elevation unavailable' : Math.round(picked.elev) + ' m');
+  $('pickUse').disabled = false;
+  $('pickSave').disabled = false;
+  $('pickName').disabled = false;
+  if (!$('pickName').value) $('pickName').value = `Point ${lat}, ${lon}`;
+}
+
+function usePicked() {
+  if (!picked) return;
+  $('lat').value = picked.lat;
+  $('lon').value = picked.lon;
+  $('place').value = 'custom';
+  $('pickModal').hidden = true;
+  load();
+}
+
+$('pick').addEventListener('click', openPicker);
+$('pickClose').addEventListener('click', () => { $('pickModal').hidden = true; });
+$('pickModal').addEventListener('click', e => {
+  if (e.target === $('pickModal')) $('pickModal').hidden = true;
+});
+$('pickUse').addEventListener('click', usePicked);
+$('pickSave').addEventListener('click', () => {
+  if (!picked) return;
+  const name = ($('pickName').value || '').trim() || `Point ${picked.lat}, ${picked.lon}`;
+  const favs = readFavs().filter(f => f.name !== name);
+  favs.push({ name, lat: picked.lat, lon: picked.lon, elev: picked.elev });
+  writeFavs(favs);
+  renderFavs(`${picked.lat},${picked.lon}`);
+  usePicked();
+});
+$('cloudstyle').addEventListener('change', () => {
+  cloudStyle = $('cloudstyle').value;
+  legends(); draw();
+});
+
+renderFavs();
+legends();
+load();
+</script>
+</body>
+</html>
