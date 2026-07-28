@@ -140,8 +140,15 @@
     <div class="ctl">
       <label for="cloudstyle">Cloud style</label>
       <select id="cloudstyle">
-        <option value="windy">Windy (smooth)</option>
-        <option value="meteoblue" selected>Meteoblue (bands)</option>
+        <option value="smooth">Smooth</option>
+        <option value="meteoblue" selected>Banded</option>
+      </select>
+    </div>
+    <div class="ctl">
+      <label for="exposure">Exposure</label>
+      <select id="exposure">
+        <option value="shade" selected>Shade</option>
+        <option value="sun">In sun</option>
       </select>
     </div>
     <div class="ctl">
@@ -218,23 +225,29 @@ const TEMP_STOPS_C = [
 
 const WIND_STEP = 5, TEMP_STEP = 1, WIND_EMPH = 4, TEMP_EMPH = 5;
 
-/* Two cloud renderings, switchable.
+/* Two cloud renderings, both on Meteoblue's palette — they differ only in
+   whether the transition is stepped or continuous.
 
-   Windy (default) — a smooth grey ramp over a pale lavender sky, sampled from
-   its meteogram canvas: background rgb(234,234,245), greys stepping 223, 191,
-   159 down toward 130 at full cover.
+   Banded — five DISCRETE bands with nothing drawn below 10%, read from the
+   meteoblue meteogram legend. Quantised on purpose: 60% and 80% are easy to
+   tell apart, which a smooth ramp makes hard.
 
-   Meteoblue — five DISCRETE bands with nothing drawn below 10%, read from its
-   meteogram legend. Quantised on purpose: 60% and 80% are easy to tell apart,
-   which a smooth ramp makes hard.                                          */
-const SKY_FILL = 'rgb(234,234,245)';
-const WINDY_CLOUD = [
-  [0,   234,234,245],
-  [10,  228,228,236],
-  [25,  223,223,223],
-  [50,  191,191,191],
-  [75,  159,159,159],
-  [100, 130,130,130]
+   Smooth — the same colours as a continuous ramp. The band colours sit at the
+   MIDPOINT of the range each one represents, so quantising this ramp
+   reproduces the bands rather than landing half a step off. White is held
+   flat to 10% so thin cloud still reads as clear sky, as Meteoblue has it.
+   The earlier version of this used Windy's own ramp, which starts on a pale
+   lavender and only reaches rgb(130,130,130) — noticeably washed out beside
+   Meteoblue's white-to-rgb(86,86,86) range.                                */
+const SMOOTH_CLOUD = [
+  [0,    255,255,255],
+  [10,   255,255,255],
+  [17.5, 210,210,210],
+  [37.5, 177,177,177],
+  [62.5, 146,146,146],
+  [82.5, 115,115,115],
+  [95,    86, 86, 86],
+  [100,   86, 86, 86]
 ];
 const MB_BANDS = [
   [10, [255,255,255]], [25, [210,210,210]], [50, [177,177,177]],
@@ -248,9 +261,9 @@ const RAIN_BLUE  = 'rgb(0,64,255)';
 const SNOW_FILL  = '#7fb4e8';
 const RAIN_BAND_FRAC = 0.20;
 const CLOUDBASE_ROW = 19;
-/* Two thin strips above the cloud panel for mid and high cloud, stacked in
-   the order the atmosphere puts them: high, then mid, then the resolved
-   low-level cross-section below. */
+/* One thin strip above the cloud panel for high cloud. Mid cloud was dropped
+   as a strip; note that with the axis at 1500 m the cross-section below does
+   not reach 2-6 km either, so mid now appears only in the hover readout. */
 const CLOUD_STRIP = 17;
 /* Linear against a fixed ceiling, so a bar means the same thing on every fetch
    and between locations. 0.1 mm is meant to be barely visible — the label
@@ -317,12 +330,12 @@ function makeRamp(stops) {
 const windStops = alignStops(WIND_STOPS_MS, toKmh, WIND_STEP);
 const tempStops = alignStops(TEMP_STOPS_C, v => v, TEMP_STEP);
 const windRamp = makeRamp(windStops), tempRamp = makeRamp(tempStops);
-const windyCloud = makeRamp(WINDY_CLOUD);
+const smoothCloud = makeRamp(SMOOTH_CLOUD);
 function mbBands(v) {
   for (const [ceil, rgb] of MB_BANDS) if (v < ceil) return rgb;
   return MB_BANDS[MB_BANDS.length - 1][1];
 }
-function cloudRamp(v) { return cloudStyle === 'windy' ? windyCloud(v) : mbBands(v); }
+function cloudRamp(v) { return cloudStyle === 'smooth' ? smoothCloud(v) : mbBands(v); }
 const css = c => `rgb(${Math.round(c[1])},${Math.round(c[2])},${Math.round(c[3])})`;
 
 /* ---------- data ------------------------------------------------------- */
@@ -377,16 +390,61 @@ function blendFrac(hPa) {
   return (925 - hPa) / 75;
 }
 
+/* best_match hides which model it picked. Open-Meteo does not name it, so
+   identify it by comparison: request the same series from best_match and from
+   each candidate in one call, then find the candidate whose values match
+   exactly. VERIFIED 2026-07-27: multi-model returns ONE object with the model
+   name suffixed onto every key, including temperature_850hPa_best_match. The
+   array branch below is the multi-LOCATION shape and is currently unreachable;
+   it is kept only in case this is ever folded into the probe-ring request.
+   Exact equality was confirmed to work — best_match matched ICON to the
+   decimal. Returns null rather than guessing. */
+/* Globals are tested BEFORE the seamless variants. Verified 2026-07-27 against
+   the live API over Cape Town: icon_seamless and icon_global return identical
+   series here, as do gfs_seamless and gfs_global, because no higher-resolution
+   model covers South Africa for seamless to splice in. Testing seamless first
+   therefore reported a name that was true only by coincidence. Where seamless
+   genuinely differs the global will not match and we fall through to it. */
+const BEST_MATCH_CANDIDATES = ['ecmwf_ifs025','icon_global','gfs_global',
+  'ukmo_global_deterministic_10km','gem_global','icon_seamless','gfs_seamless',
+  'ukmo_seamless','gem_seamless','meteofrance_seamless'];
+
+async function identifyBestMatch(lat, lon) {
+  const models = ['best_match'].concat(BEST_MATCH_CANDIDATES);
+  const url = `https://api.open-meteo.com/v1/forecast?latitude=${lat}&longitude=${lon}`
+            + `&hourly=temperature_850hPa&models=${models.join(',')}&forecast_days=1`;
+  let j;
+  try { j = await (await fetch(url)).json(); } catch (e) { return null; }
+
+  const series = m => {
+    if (Array.isArray(j)) {
+      const o = j[models.indexOf(m)];
+      return o && o.hourly ? o.hourly.temperature_850hPa : null;
+    }
+    const h = (j && j.hourly) || {};
+    return h[`temperature_850hPa_${m}`] || h.temperature_850hPa || null;
+  };
+
+  const ref = series('best_match');
+  if (!ref || !ref.length) return null;
+  const same = (a, b) => a && b && a.length === b.length
+    && a.every((v, i) => v === b[i] || (v == null && b[i] == null));
+
+  for (const m of BEST_MATCH_CANDIDATES) if (same(ref, series(m))) return m;
+  return null;
+}
+
 async function fetchGrid(lat, lon, model, days) {
   const vars = [];
   for (const L of LEVELS) {
     vars.push(`geopotential_height_${L}hPa`, `temperature_${L}hPa`,
               `wind_speed_${L}hPa`, `wind_direction_${L}hPa`,
-              `cloud_cover_${L}hPa`);
+              `cloud_cover_${L}hPa`, `relative_humidity_${L}hPa`);
   }
   vars.push('precipitation', 'rain', 'showers', 'snowfall',
             'precipitation_probability', 'cloud_base',
-            'cloud_cover_mid', 'cloud_cover_high');
+            'cloud_cover_mid', 'cloud_cover_high',
+            'shortwave_radiation', 'terrestrial_radiation');
 
   const pts = blendCells ? buildProbe(lat, lon) : [[+lat, +lon]];
   const url = `https://api.open-meteo.com/v1/forecast`
@@ -428,6 +486,7 @@ async function fetchGrid(lat, lon, model, days) {
   const heights = new Float32Array(m*n), wind = new Float32Array(m*n);
   const temp = new Float32Array(m*n), dir = new Float32Array(m*n);
   const cloud = new Float32Array(m*n);
+  const rh = new Float32Array(m*n);
 
   /* Direction has to be blended as a vector, or 350 and 10 average to 180. */
   for (let i = 0; i < m; i++) {
@@ -440,14 +499,17 @@ async function fetchGrid(lat, lon, model, days) {
       const nWs = near.hourly[key('wind_speed')][jx];
       const nWd = near.hourly[key('wind_direction')][jx];
       const nCc = near.hourly[key('cloud_cover')][jx];
+      const rhArr = near.hourly[key('relative_humidity')];
+      const nRh = rhArr ? rhArr[jx] : null;
 
       if (f <= 0 || cells.length < 2) {
         heights[k] = nGh; temp[k] = nTp; wind[k] = nWs;
         dir[k] = nWd; cloud[k] = nCc == null ? 0 : nCc;
+        rh[k] = nRh == null ? NaN : nRh;
         continue;
       }
 
-      let gh = 0, tp = 0, ws = 0, cc = 0, ux = 0, uy = 0;
+      let gh = 0, tp = 0, ws = 0, cc = 0, rr = 0, ux = 0, uy = 0;
       for (let c = 0; c < cells.length; c++) {
         const hh = cells[c].hourly, wgt = weights[c] / wsum;
         gh += (hh[key('geopotential_height')][jx] ?? nGh) * wgt;
@@ -458,6 +520,8 @@ async function fetchGrid(lat, lon, model, days) {
         ux += Math.sin(dg) * sp * wgt;
         uy += Math.cos(dg) * sp * wgt;
         cc += ((hh[key('cloud_cover')][jx] ?? nCc) || 0) * wgt;
+        const ha = hh[key('relative_humidity')];
+        rr += ((ha ? ha[jx] : null) ?? nRh ?? NaN) * wgt;
       }
       const bd = (Math.atan2(ux, uy) * 180 / Math.PI + 360) % 360;
 
@@ -465,6 +529,7 @@ async function fetchGrid(lat, lon, model, days) {
       temp[k]    = nTp*(1-f) + tp*f;
       wind[k]    = nWs*(1-f) + ws*f;
       cloud[k]   = (nCc == null ? 0 : nCc)*(1-f) + cc*f;
+      rh[k]      = nRh == null ? NaN : nRh*(1-f) + rr*f;
       let dd = ((bd - nWd + 540) % 360) - 180;
       dir[k] = (nWd + dd*f + 360) % 360;
     }
@@ -481,6 +546,12 @@ async function fetchGrid(lat, lon, model, days) {
      to 12 km. Open-Meteo's convention: mid roughly 2-6 km, high above that. */
   const cloudMid  = zero(h.cloud_cover_mid);
   const cloudHigh = zero(h.cloud_cover_high);
+  /* terrestrial_radiation is top-of-atmosphere, used as the clear-sky
+     reference; shortwave_radiation is what actually reaches the surface after
+     all cloud. Keeping both lets the sun-exposed calculation add back the
+     cloud that is below you. */
+  const swSurface = zero(h.shortwave_radiation);
+  const toa       = zero(h.terrestrial_radiation);
 
   const cloudBase = new Array(n).fill(null);
   for (let jx = 0; jx < n; jx++) {
@@ -506,7 +577,8 @@ async function fetchGrid(lat, lon, model, days) {
   const terrain = await nearbyTerrain(+lat, +lon);
 
   return { times, nLevels: m, levels: kept, heights, wind, temp, dir, cloud,
-           precip, rain, showers, snow, prob, cloudBase, cloudMid, cloudHigh,
+           rh, precip, rain, showers, snow, prob, cloudBase, cloudMid, cloudHigh,
+           swSurface, toa,
            elevation: near.elevation, terrainMin: terrain.min, terrainMean: terrain.mean,
            cellLat: near.latitude, cellLon: near.longitude,
            cellsUsed: blendCells ? cells.length : 1,
@@ -517,17 +589,18 @@ function columnAt(g, fx) {
   const raw = fx * (g.n - 1);
   const j = Math.max(0, Math.min(g.n - 2, Math.floor(raw)));
   const f = raw - j;
-  const h = [], wind = [], temp = [], dir = [], cloud = [];
+  const h = [], wind = [], temp = [], dir = [], cloud = [], rh = [];
   for (let i = 0; i < g.nLevels; i++) {
     const a = i*g.n + j, b = a + 1;
     h.push(g.heights[a]*(1-f) + g.heights[b]*f);
     wind.push(g.wind[a]*(1-f) + g.wind[b]*f);
     temp.push(g.temp[a]*(1-f) + g.temp[b]*f);
     cloud.push(g.cloud[a]*(1-f) + g.cloud[b]*f);
+    rh.push(g.rh ? g.rh[a]*(1-f) + g.rh[b]*f : NaN);
     const d = ((g.dir[b] - g.dir[a] + 540) % 360) - 180;
     dir.push((g.dir[a] + d*f + 360) % 360);
   }
-  return { h, wind, temp, dir, cloud };
+  return { h, wind, temp, dir, cloud, rh };
 }
 
 function atHeight(col, field, hv) {
@@ -734,7 +807,7 @@ function draw() {
       label: 'Temperature (\u00B0C)', arrows: false, iso: true, extra: 0 },
     { f: cS, ramp: cloudRamp, step: 25, emph: 1,
       label: 'Cloud cover, rain and cloud base', arrows: false, iso: false,
-      cloud: true, above: CLOUD_STRIP*2, extra: CLOUDBASE_ROW }
+      cloud: true, above: CLOUD_STRIP, extra: CLOUDBASE_ROW }
   ];
 
   const blockTops = []; let y = TOP;
@@ -851,15 +924,16 @@ function rainBars(g, x, top, w, h) {
   }
 }
 
-/* Mid and high cloud as shaded strips above the panel.
+/* High cloud as a shaded strip above the panel.
 
-   These are the model's aggregate layer fractions, not a cross-section — the
+   This is the model's aggregate layer fraction, not a cross-section — the
    chart's axis stops a couple of thousand metres up and cirrus lives near
-   twelve. Drawn with the same cloud ramp as the panel, so the Windy /
-   Meteoblue toggle governs them too, and interpolated between hours to match
-   the panel rather than showing hourly steps. */
+   twelve, so a strip is the only shape that does not imply a precision the
+   figure does not have. Drawn with the same cloud ramp as the panel, so the
+   style toggle governs it too, and interpolated between hours to match the
+   panel rather than showing hourly steps. */
 function cloudStrips(g, x, y, w) {
-  const rows = [['High', grid.cloudHigh], ['Mid', grid.cloudMid]];
+  const rows = [['High', grid.cloudHigh]];
   g.setLineDash([]);
 
   rows.forEach(([label, arr], k) => {
@@ -936,28 +1010,38 @@ function gridlines(g, x, top, w, h) {
   const fx = d => (d - t0) / span;
   g.setLineDash(GRID_DASH);
 
+  /* Verticals now mirror the horizontals exactly: a fine tier and a strong
+     tier, same dash, same two alphas. The fine tier is 3-hourly by default —
+     matching the hour labels — and tightens to hourly when zoomed in or
+     widens if the days get squeezed. Noon carries the strong tier; midnight
+     is drawn separately as a solid day divider. */
+  const vStep = gridHourStep(w);
+
   g.strokeStyle = GRID_MINOR; g.lineWidth = 0.5;
   g.beginPath();
   for (let i = 0; i < grid.n; i++) {
     const hr = grid.times[i].getHours();
-    if (hr % 6 === 0 && hr !== 0) {
-      const px = Math.round(xAtT(fx(grid.times[i].getTime()))) + .5;
-      if (px >= x && px <= x + w) { g.moveTo(px, top); g.lineTo(px, top + h); }
-    }
+    if (hr % vStep !== 0 || hr === 0 || hr === 12) continue;   // drawn by a stronger tier
+    const px = Math.round(xAtT(fx(grid.times[i].getTime()))) + .5;
+    if (px >= x && px <= x + w) { g.moveTo(px, top); g.lineTo(px, top + h); }
   }
-  const [hA, hB] = hSpan(), hRange = hB - hA;
-  const minorStep = hRange <= 800 ? 50 : hRange <= 1500 ? 100 : hRange <= 2500 ? 250 : 500;
-  for (let hv = Math.ceil(hA/minorStep)*minorStep; hv < hB; hv += minorStep) {
-    if (hv % (minorStep*2) === 0) continue;
+  const [hA, hB] = hSpan();
+  const { major, minor } = heightSteps();
+  for (let hv = Math.ceil(hA/minor)*minor; hv < hB; hv += minor) {
+    if (Math.abs(hv/major - Math.round(hv/major)) < 1e-6) continue;   // drawn as major
     const py = Math.round(yAtH(hv, top)) + .5;
     g.moveTo(x, py); g.lineTo(x + w, py);
   }
   g.stroke();
 
-  const majorStep = minorStep * 2;
   g.strokeStyle = GRID_MAJOR; g.lineWidth = 1;
   g.beginPath();
-  for (let hv = Math.ceil(hA/majorStep)*majorStep; hv < hB; hv += majorStep) {
+  for (let i = 0; i < grid.n; i++) {
+    if (grid.times[i].getHours() !== 12) continue;
+    const px = Math.round(xAtT(fx(grid.times[i].getTime()))) + .5;
+    if (px >= x && px <= x + w) { g.moveTo(px, top); g.lineTo(px, top + h); }
+  }
+  for (let hv = Math.ceil(hA/major)*major; hv < hB; hv += major) {
     const py = Math.round(yAtH(hv, top)) + .5;
     g.moveTo(x, py); g.lineTo(x + w, py);
   }
@@ -1165,18 +1249,41 @@ function trailheadValue() {
   return grid && grid.terrainMin != null ? grid.terrainMin : null;
 }
 
+/* One ladder for the labelled ticks and the gridlines, so they cannot drift
+   apart — previously the labels stepped 250 m while the major gridlines
+   stepped 200 m. Aims for about five labelled divisions and allows a 2.5
+   multiplier so 250 and 25 remain reachable. */
+function heightSteps() {
+  const [a, b] = hSpan();
+  const raw = Math.max(1e-6, (b - a) / 5);
+  const mag = Math.pow(10, Math.floor(Math.log10(raw)));
+  const n = raw / mag;
+  const major = (n <= 1.5 ? 1 : n <= 2.2 ? 2 : n <= 3.5 ? 2.5 : n <= 7.5 ? 5 : 10) * mag;
+  return { major, minor: major / 2 };
+}
+
 function yAxis(g, x, top, h) {
-  const [hA, hB] = hSpan(), range = hB - hA;
-  const step = range <= 400 ? 50 : range <= 800 ? 100 : range <= 1500 ? 250
-             : range <= 2500 ? 500 : 1000;
+  const [hA, hB] = hSpan();
+  const step = heightSteps().major;
   g.font = F_AXIS;
   g.textAlign = 'right'; g.textBaseline = 'middle';
   g.strokeStyle = 'rgba(0,0,0,.45)'; g.lineWidth = 1; g.setLineDash([]);
-  for (let hv = Math.ceil(hA/step)*step; hv <= hB; hv += step) {
+  for (let hv = Math.ceil(hA/step)*step; hv <= hB + 1e-6; hv += step) {
     const y = yAtH(hv, top);
     g.beginPath(); g.moveTo(x - 5, y); g.lineTo(x, y); g.stroke();
-    g.fillStyle = INK; g.fillText(String(hv), x - 8, y);
+    g.fillStyle = INK; g.fillText(String(Math.round(hv)), x - 8, y);
   }
+}
+
+/* Gridlines can sit closer together than labels, so this uses a tighter
+   minimum spacing than hourStep. Both follow the visible span, so zooming
+   in gives hourly lines rather than leaving 3-hourly ones stranded. */
+function gridHourStep(w) {
+  const full = (grid.times[grid.n-1] - grid.times[0]) / 3600000;
+  const hours = full * (viewT[1] - viewT[0]);
+  const pxPerHour = w / hours;
+  for (const st of [1, 3, 6, 12]) if (st * pxPerHour >= 22) return st;
+  return 24;
 }
 
 function hourStep(w) {
@@ -1352,6 +1459,67 @@ function zoomUI() {
   document.addEventListener('keydown', e => { if (e.key === 'Escape' && isZoomed()) resetZoom(); });
 })();
 
+/* Apparent temperature, Steadman's shade formulation — the one the Australian
+   Bureau of Meteorology publishes.
+
+     AT = Ta + 0.33e - 0.70ws - 4.00
+     e  = (rh/100) * 6.105 * exp(17.27 Ta / (237.7 + Ta))
+
+   with e the water vapour pressure in hPa and ws the wind in m/s. It replaced
+   JAG/TI wind chill here because it is continuous: humidity warms, wind cools,
+   and every term stays meaningful from freezing up through a hot afternoon.
+   JAG/TI is the more cautious instrument in severe cold, but it is undefined
+   above 10 C and in light wind, and those blanks covered most of the
+   conditions this chart is actually used in.
+
+   Computed from the profile at the cursor height, so it answers what it will
+   feel like up there rather than at the car.
+
+   The -4.00 is a shade assumption, so on a calm mild day this reads a couple
+   of degrees BELOW the air temperature. That is the formula behaving
+   correctly, not a bug — in direct sun the real figure is higher. */
+function feelsLike(tC, windKmh, rhPct, Q) {
+  if (!isFinite(tC) || !isFinite(windKmh) || !isFinite(rhPct)) return null;
+  const ws = windKmh / 3.6;
+  const e = (rhPct / 100) * 6.105 * Math.exp(17.27 * tC / (237.7 + tC));
+  if (Q == null) return tC + 0.33 * e - 0.70 * ws - 4.00;              // shade
+  return tC + 0.348 * e - 0.70 * ws + 0.70 * Q / (ws + 10) - 4.25;     // sun-exposed
+}
+
+/* Fraction of the sky covered by cloud AT OR ABOVE a height. Cloud below you
+   does not shade you — which is the whole point of computing this from the
+   profile rather than from a total-cover field. Standing above an inversion
+   deck should read as full sun, and here it does. */
+function cloudAbove(col, hv) {
+  let c = 0;
+  for (let i = 0; i < col.h.length; i++)
+    if (col.h[i] >= hv && isFinite(col.cloud[i])) c = Math.max(c, col.cloud[i]);
+  return c / 100;
+}
+
+/* Net radiation absorbed by the body, for Steadman's sun term.
+
+   Mapping incident shortwave to Steadman's Q is the weakest link in this
+   whole calculation — Q is absorption per unit of body surface, which depends
+   on posture, clothing and albedo. SUN_Q is a blunt coefficient chosen so
+   that clear midday summer sun adds roughly 4-5 C in light wind, which is the
+   order BoM's published sun-exposed figures show. Treat the number as
+   indicative, not precise.
+
+   Clear-sky surface radiation is taken as 0.75 of top-of-atmosphere, then cut
+   by cloud above the cursor using Kasten and Czeplak's 1 - 0.75c^3. */
+const SUN_Q = 0.10;
+
+function sunQ(col, hv, iHour) {
+  const toa = grid.toa ? grid.toa[iHour] : 0;
+  if (!isFinite(toa) || toa <= 0) return 0;                   // night
+  const clearSky = 0.75 * toa;
+  const low  = cloudAbove(col, hv);
+  const high = grid.cloudHigh ? (grid.cloudHigh[iHour] || 0) / 100 : 0;
+  const c = 1 - (1 - low) * (1 - high);                       // random overlap
+  return SUN_Q * clearSky * (1 - 0.75 * Math.pow(c, 3));
+}
+
 /* ---------- hover ------------------------------------------------------- */
 
 const DIRS = ['N','NNE','NE','ENE','E','ESE','SE','SSE','S','SSW','SW','WSW','W','WNW','NW','NNW'];
@@ -1370,11 +1538,18 @@ document.getElementById('chart').addEventListener('pointermove', ev => {
   const iHour = Math.round(fx*(grid.n - 1));
   const t = grid.times[iHour];
   const deg = atHeight(col, col.dir, hv);
+  const wKmh = toKmh(atHeight(col, col.wind, hv));
+  const tHere = atHeight(col, col.temp, hv);
+  const rhHere = atHeight(col, col.rh, hv);
+  const inSun = document.getElementById('exposure').value === 'sun';
+  const chill = feelsLike(tHere, wKmh, rhHere, inSun ? sunQ(col, hv, iHour) : null);
   out.innerHTML =
     `<span><span class="k">at</span> ${t.toLocaleString(undefined,{weekday:'short',hour:'2-digit',minute:'2-digit'})}</span>`
   + `<span><span class="k">height</span> ${Math.round(hv/10)*10} m</span>`
-  + `<span><span class="k">wind</span> ${toKmh(atHeight(col,col.wind,hv)).toFixed(0)} km/h ${DIRS[Math.round(deg/22.5)%16]}</span>`
-  + `<span><span class="k">temp</span> ${atHeight(col,col.temp,hv).toFixed(1)} \u00B0C</span>`
+  + `<span><span class="k">wind</span> ${wKmh.toFixed(0)} km/h ${DIRS[Math.round(deg/22.5)%16]}</span>`
+  + `<span><span class="k">temp</span> ${tHere.toFixed(1)} \u00B0C</span>`
+  + `<span><span class="k">feels</span> ${chill == null ? '\u2013' : chill.toFixed(1) + ' \u00B0C'}</span>`
+  + `<span><span class="k">rh</span> ${isFinite(rhHere) ? Math.round(rhHere) + '%' : '\u2013'}</span>`
   + `<span><span class="k">cloud</span> ${Math.round(atHeight(col,col.cloud,hv))}% here`
   + `, mid ${Math.round(grid.cloudMid ? grid.cloudMid[iHour] : 0)}%`
   + `, high ${Math.round(grid.cloudHigh ? grid.cloudHigh[iHour] : 0)}%</span>`
@@ -1395,9 +1570,9 @@ function legends() {
     + '<span><i class="dash"></i>Ground here</span>'
     + '<span><i class="night"></i>Night</span>'
     + '<span>Arrows show where the wind is blowing to, fading out below ~4 km/h</span>';
-  const sw = cloudStyle === 'windy'
-    ? [['rgb(223,223,223)','25%'],['rgb(191,191,191)','50%'],
-       ['rgb(159,159,159)','75%'],['rgb(130,130,130)','100%']]
+  const sw = cloudStyle === 'smooth'
+    ? [['rgb(198,198,198)','25%'],['rgb(162,162,162)','50%'],
+       ['rgb(127,127,127)','75%'],['rgb(86,86,86)','100%']]
     : [['#d2d2d2','10-25%'],['#b1b1b1','25-50%'],['#929292','50-75%'],
        ['#737373','75-90%'],['#565656','90-100%']];
   document.getElementById('legCloud').innerHTML = '<b>Cloud</b>'
@@ -1406,7 +1581,7 @@ function legends() {
     + '<span><i style="background:#7fb4e8"></i>Snow</span>'
     + `<span>Rain bars linear to ${RAIN_CEILING} mm/h, then clipped</span>`
     + `<span>Cloud base = lowest level with &ge;${CLOUD_BASE_PCT}% cloud; &ldquo;--&rdquo; means none</span>`
-    + '<span>Mid and high strips are layer totals, not resolved by height</span>';
+    + '<span>High strip is a layer total, not resolved by height</span>';
 }
 
 const $ = id => document.getElementById(id);
@@ -1477,6 +1652,8 @@ async function load() {
     const res = await getGrid($('lat').value, $('lon').value, $('model').value, $('days').value);
     if (seq !== loadSeq) return;          // a newer request has overtaken this one
     grid = res.grid;
+    if ($('model').value === 'best_match' && grid.resolved === undefined)
+      grid.resolved = await identifyBestMatch($('lat').value, $('lon').value);
     if (!$('trailhead').value && grid.terrainMin != null)
       $('trailhead').placeholder = Math.round(grid.terrainMin);
 
@@ -1488,7 +1665,9 @@ async function load() {
                  (grid.cellLon - +$('lon').value) * Math.cos(grid.cellLat*Math.PI/180))).toFixed(1);
     const inBand = grid.levels.filter((L, i) => grid.heights[i*grid.n] <= axisTop);
 
-    st.innerHTML = `${grid.model} &middot; cell ${grid.cellLat.toFixed(3)}, ${grid.cellLon.toFixed(3)} `
+    const shown = grid.model === 'best_match'
+      ? `best match &rarr; <b>${grid.resolved || 'unidentified'}</b>` : grid.model;
+    st.innerHTML = `${shown} &middot; cell ${grid.cellLat.toFixed(3)}, ${grid.cellLon.toFixed(3)} `
       + `(${dKm} km away)`
       + (grid.cellsUsed > 1 ? ` &middot; blending ${grid.cellsUsed} cells above 925 hPa` : '')
       + (sameCell ? ' <b>&mdash; same cell as before, so the panels are unchanged</b>' : '')
@@ -1610,6 +1789,7 @@ $('pickSave').addEventListener('click', () => {
   renderFavs(`${picked.lat},${picked.lon}`);
   usePicked();
 });
+$('exposure').addEventListener('change', () => { /* readout only; no redraw */ });
 $('cloudstyle').addEventListener('change', () => {
   cloudStyle = $('cloudstyle').value;
   legends(); draw();
