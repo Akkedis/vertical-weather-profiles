@@ -65,6 +65,35 @@
                  border-top:1px solid var(--line); flex-wrap:wrap; font-size:13px; }
   .modal__foot .grow { flex:1 1 auto; }
   #pickName { width:170px; }
+
+  /* ---- route inputs and derived summary ---- */
+  .rowlabel { width:100%; font-size:11px; color:var(--muted); text-transform:uppercase;
+              letter-spacing:.04em; margin:4px 0 -4px; }
+  input[type=datetime-local] { width:196px; }
+  .routesum { font-size:12px; color:var(--muted); margin-top:10px; display:flex;
+              flex-wrap:wrap; gap:4px 16px; font-variant-numeric:tabular-nums; }
+  .routesum b { font-weight:600; color:var(--ink); }
+  .routesum .warn { color:#a32d2d; }
+
+  /* ---- mobile ----
+     On a phone the control block alone filled the screen, so below 760px it
+     collapses behind a single button and the charts get the room instead. */
+  .ctl-toggle { display:none; }
+  @media (max-width: 760px) {
+    body { padding:10px 10px 28px; }
+    h1 { font-size:17px; margin-bottom:2px; }
+    .sub { display:none; }
+    .ctl-toggle { display:block; width:100%; margin-bottom:8px; }
+    .controls { display:none; margin-bottom:8px; }
+    .controls.open { display:flex; }
+    .ctl { flex:1 1 46%; min-width:0; }
+    .ctl select, .ctl input, input[type=number],
+    input[type=datetime-local], #pickName { width:100%; }
+    .readout { font-size:12px; gap:3px 12px; }
+    .chartwrap { padding:8px 6px 4px; }
+    .note { font-size:11px; }
+    .modal__foot { font-size:12px; }
+  }
 </style>
 </head>
 <body>
@@ -73,6 +102,7 @@
   <p class="sub">Wind and temperature over height, from Open-Meteo. Free, no API key, runs entirely in this page.</p>
 
   <header class="sticky-head">
+  <button id="ctlToggle" class="ctl-toggle" type="button" aria-expanded="false">Settings and route</button>
   <div class="controls">
     <div class="ctl">
       <label for="place">Place</label>
@@ -157,6 +187,28 @@
       <label for="trailhead">Trailhead m</label>
       <input id="trailhead" type="number" step="10" placeholder="auto">
     </div>
+
+    <div class="rowlabel">Route &mdash; leave all three blank for no route</div>
+    <div class="ctl">
+      <label for="rtStart">Leave trailhead</label>
+      <input id="rtStart" type="datetime-local">
+    </div>
+    <div class="ctl">
+      <label for="rtPeak">Reach summit</label>
+      <input id="rtPeak" type="datetime-local">
+    </div>
+    <div class="ctl">
+      <label for="rtBuffer">Minutes on top</label>
+      <input id="rtBuffer" type="number" step="15" min="0" value="60">
+    </div>
+    <div class="ctl">
+      <label for="rtEnd">Back at trailhead</label>
+      <input id="rtEnd" type="datetime-local">
+    </div>
+    <div class="ctl">
+      <label for="rtClear">&nbsp;</label>
+      <button id="rtClear" type="button">Clear route</button>
+    </div>
   </div>
 
   <div class="status" id="status">Ready.</div>
@@ -168,6 +220,7 @@
       <canvas id="chart"></canvas>
       <canvas id="overlay"></canvas>
     </div>
+    <div class="routesum" id="routeSummary"></div>
     <div class="zoombar">
       <span id="zoominfo">Drag across the chart to zoom &middot; double-click to reset</span>
       <button id="zoomout" hidden>Reset zoom</button>
@@ -767,6 +820,8 @@ const isZoomed = () => viewT[0] > 0 || viewT[1] < 1 || viewH !== null;
 let layout = null, grid = null, axisTop = 2500, panelH = 600, showArrows = true;
 let cloudStyle = 'meteoblue';
 let blendCells = true;
+let route = null;      // {pts:[{t,h} x4], hPeak, hTrail} or null when not set
+let probe = null;      // {x, y, top} — a tapped sample point, for touch
 
 function arrowAlpha(ms) {
   if (ms <= ARROW_ALPHA[0][0]) return 0;
@@ -777,8 +832,225 @@ function arrowAlpha(ms) {
   return 1;
 }
 
+/* ---------- route -------------------------------------------------------
+
+   Three times and a buffer describe a there-and-back walk as four points in
+   time and height: leave the trailhead, reach the summit, linger, come back
+   down. Everything else — the line across the panels and the derived chart —
+   is interpolation between those four.
+
+   Heights come from where the rest of the tool already gets them: the summit
+   is the elevation of the chosen point, the trailhead is the manual field if
+   set and otherwise the lowest ground within 5 km.
+
+   Worth remembering when reading the output: this is the free-atmosphere
+   column at that height, not conditions on the ridge. A line invites more
+   trust than a colour fill does, which is why the note under the chart says
+   so explicitly.                                                          */
+
+const R_TITLE = 22, R_RIBBON = 16, R_GAP = 6, R_H = 130, R_AXIS = 22;
+const ROUTE_BLOCK = R_TITLE + R_RIBBON + R_GAP + R_H + R_AXIS;
+const ROUTE_STEP_MS = 600000;                       // sample every ten minutes
+
+function fracAt(ms) {
+  const a = grid.times[0].getTime(), b = grid.times[grid.n - 1].getTime();
+  return b === a ? 0 : (ms - a) / (b - a);
+}
+
+function buildRoute() {
+  if (!grid) return null;
+  const sv = $('rtStart').value, pv = $('rtPeak').value, ev = $('rtEnd').value;
+  if (!sv || !pv || !ev) return null;
+  const t0 = new Date(sv), t1 = new Date(pv), t2 = new Date(ev);
+  if (!isFinite(+t0) || !isFinite(+t1) || !isFinite(+t2)) return null;
+  const buf = Math.max(0, +$('rtBuffer').value || 0) * 60000;
+  const t1b = new Date(t1.getTime() + buf);
+  if (t1 <= t0 || t2 <= t1b) return null;           // times out of order
+  const hPeak = grid.elevation;
+  const hTrail = $('trailhead').value !== '' ? +$('trailhead').value
+               : (grid.terrainMin != null ? grid.terrainMin : grid.elevation);
+  return { pts: [{ t: t0, h: hTrail }, { t: t1, h: hPeak },
+                 { t: t1b, h: hPeak }, { t: t2, h: hTrail }], hPeak, hTrail };
+}
+
+function routeHeightAt(ms) {
+  const p = route.pts;
+  if (ms < p[0].t.getTime() || ms > p[p.length - 1].t.getTime()) return null;
+  for (let i = 0; i < p.length - 1; i++) {
+    const a = p[i].t.getTime(), b = p[i + 1].t.getTime();
+    if (ms <= b) {
+      const f = b === a ? 0 : (ms - a) / (b - a);
+      return p[i].h + (p[i + 1].h - p[i].h) * f;
+    }
+  }
+  return p[p.length - 1].h;
+}
+
+function routeLine(g, top) {
+  const pts = route.pts.map(p => ({ x: xAtT(fracAt(p.t.getTime())), y: yAtH(p.h, top) }));
+  g.setLineDash([]); g.lineJoin = 'round'; g.lineCap = 'round';
+  for (const [style, width] of [['rgba(255,255,255,.92)', 5], ['rgba(0,0,0,.85)', 2]]) {
+    g.strokeStyle = style; g.lineWidth = width;
+    g.beginPath(); g.moveTo(pts[0].x, pts[0].y);
+    for (let i = 1; i < pts.length; i++) g.lineTo(pts[i].x, pts[i].y);
+    g.stroke();
+  }
+  for (const p of pts) {
+    g.beginPath(); g.arc(p.x, p.y, 3.4, 0, Math.PI * 2);
+    g.fillStyle = '#fff'; g.fill();
+    g.lineWidth = 1.7; g.strokeStyle = 'rgba(0,0,0,.85)'; g.stroke();
+  }
+}
+
+/* The same interpolation the hover readout does, walked along a path instead
+   of sitting still at the cursor. Samples outside the forecast window are
+   marked rather than dropped, so the summary can say so. */
+function sampleRoute() {
+  const t0 = route.pts[0].t.getTime(), tE = route.pts[3].t.getTime();
+  const gA = grid.times[0].getTime(), gB = grid.times[grid.n - 1].getTime();
+  const inSun = $('exposure').value === 'sun';
+  const out = [];
+  for (let ms = t0; ms <= tE; ms += ROUTE_STEP_MS) {
+    const h = routeHeightAt(ms);
+    if (ms < gA || ms > gB) { out.push({ ms, h, off: true }); continue; }
+    const fx = Math.max(0, Math.min(1, fracAt(ms)));
+    const col = columnAt(grid, fx);
+    const iHour = Math.round(fx * (grid.n - 1));
+    const temp = atHeight(col, col.temp, h);
+    const wind = toKmh(atHeight(col, col.wind, h));
+    const rh = atHeight(col, col.rh, h);
+    out.push({ ms, h, temp, wind, rh, off: false,
+               cloud: atHeight(col, col.cloud, h),
+               dir: atHeight(col, col.dir, h),
+               precip: grid.precip[iHour],
+               feels: feelsLike(temp, wind, rh, inSun ? sunQ(col, h, iHour) : null) });
+  }
+  return out;
+}
+
+function drawRouteChart(g, x, y, w) {
+  const all = sampleRoute();
+  const s = all.filter(p => !p.off);
+  renderRouteSummary(s, all.length - s.length);
+  if (s.length < 2) return;
+
+  const ribTop = y + R_TITLE;
+  const chartTop = ribTop + R_RIBBON + R_GAP;
+
+  g.setLineDash([]);
+  g.font = F_DAY; g.fillStyle = INK; g.textAlign = 'left'; g.textBaseline = 'alphabetic';
+  g.fillText('Along the route \u2014 temperature, apparent temperature, wind and cloud at your height',
+             x, y + 13);
+
+  const t0 = s[0].ms, t1 = s[s.length - 1].ms;
+  const px = ms => x + (t1 === t0 ? 0 : (ms - t0) / (t1 - t0)) * w;
+
+  for (let i = 0; i < s.length - 1; i++) {
+    const c = cloudRamp(s[i].cloud);
+    g.fillStyle = `rgb(${Math.round(c[0])},${Math.round(c[1])},${Math.round(c[2])})`;
+    g.fillRect(px(s[i].ms), ribTop, Math.ceil(px(s[i + 1].ms) - px(s[i].ms)) + 1, R_RIBBON);
+  }
+  g.strokeStyle = 'rgba(0,0,0,.28)'; g.lineWidth = 1;
+  g.strokeRect(x + .5, ribTop + .5, w - 1, R_RIBBON - 1);
+  g.font = F_HOUR; g.fillStyle = INK_FADED;
+  g.textAlign = 'right'; g.textBaseline = 'middle';
+  g.fillText('Cloud', x - 8, ribTop + R_RIBBON / 2);
+
+  const temps = s.flatMap(p => [p.temp, p.feels]).filter(v => v != null && isFinite(v));
+  let lo = Math.min(...temps), hi = Math.max(...temps);
+  if (hi - lo < 4) { const m = (hi + lo) / 2; lo = m - 2; hi = m + 2; }
+  lo = Math.floor(lo - 1); hi = Math.ceil(hi + 1);
+  const wMax = Math.max(20, Math.ceil(Math.max(...s.map(p => p.wind)) / 10) * 10);
+  const yT = v => chartTop + (1 - (v - lo) / (hi - lo)) * R_H;
+  const yW = v => chartTop + (1 - v / wMax) * R_H;
+
+  g.strokeStyle = 'rgba(0,0,0,.10)'; g.setLineDash([2, 2]);
+  for (let v = Math.ceil(lo / 2) * 2; v <= hi; v += 2) {
+    const yy = Math.round(yT(v)) + .5;
+    g.beginPath(); g.moveTo(x, yy); g.lineTo(x + w, yy); g.stroke();
+  }
+  g.setLineDash([]);
+  g.strokeStyle = 'rgba(0,0,0,.28)';
+  g.strokeRect(x + .5, chartTop + .5, w - 1, R_H - 1);
+
+  g.font = F_AXIS; g.fillStyle = INK; g.textBaseline = 'middle';
+  g.textAlign = 'right';
+  for (let v = Math.ceil(lo / 2) * 2; v <= hi; v += 2) g.fillText(v + '\u00B0', x - 8, yT(v));
+  g.textAlign = 'left';
+  const wStep = Math.max(10, Math.round(wMax / 4 / 10) * 10);
+  for (let v = 0; v <= wMax; v += wStep) g.fillText(String(v), x + w + 7, yW(v));
+
+  const stroke = (yOf, style, dash, width) => {
+    g.strokeStyle = style; g.lineWidth = width; g.setLineDash(dash);
+    g.beginPath(); let started = false;
+    for (const p of s) {
+      const Y = yOf(p);
+      if (Y == null || !isFinite(Y)) { started = false; continue; }
+      const X = px(p.ms);
+      if (started) g.lineTo(X, Y); else { g.moveTo(X, Y); started = true; }
+    }
+    g.stroke(); g.setLineDash([]);
+  };
+  stroke(p => isFinite(p.wind) ? yW(p.wind) : null, 'rgba(40,90,200,.85)', [], 1.8);
+  stroke(p => (p.feels == null ? null : yT(p.feels)), 'rgba(180,60,40,.9)', [4, 3], 1.6);
+  stroke(p => isFinite(p.temp) ? yT(p.temp) : null, 'rgba(30,30,28,.92)', [], 1.8);
+
+  const summit = route.pts[1].t.getTime(), leave = route.pts[2].t.getTime();
+  g.strokeStyle = 'rgba(0,0,0,.45)'; g.setLineDash([3, 3]); g.lineWidth = 1;
+  for (const ms of [summit, leave]) {
+    if (ms < t0 || ms > t1) continue;
+    const X = Math.round(px(ms)) + .5;
+    g.beginPath(); g.moveTo(X, ribTop); g.lineTo(X, chartTop + R_H); g.stroke();
+  }
+  g.setLineDash([]);
+
+  g.font = F_HOUR; g.fillStyle = INK_FADED;
+  g.textAlign = 'center'; g.textBaseline = 'top';
+  const stepMs = (t1 - t0) > 8 * 3600000 ? 7200000 : 3600000;
+  for (let ms = Math.ceil(t0 / stepMs) * stepMs; ms <= t1; ms += stepMs) {
+    const X = Math.round(px(ms)) + .5;
+    g.strokeStyle = 'rgba(0,0,0,.18)'; g.lineWidth = 1;
+    g.beginPath(); g.moveTo(X, chartTop + R_H); g.lineTo(X, chartTop + R_H + 4); g.stroke();
+    g.fillText(new Date(ms).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' }),
+               X, chartTop + R_H + 6);
+  }
+}
+
+function renderRouteSummary(s, offCount) {
+  const el = $('routeSummary');
+  if (!el) return;
+  if (!s.length) {
+    el.innerHTML = offCount
+      ? '<span class="warn">The route falls outside the forecast window.</span>' : '';
+    return;
+  }
+  const winds = s.map(p => p.wind).filter(isFinite);
+  const temps = s.map(p => p.temp).filter(isFinite);
+  const feels = s.map(p => p.feels).filter(v => v != null && isFinite(v));
+  const worst = s.reduce((a, p) => (isFinite(p.wind) && (!a || p.wind > a.wind) ? p : a), null);
+  const rain = s.reduce((a, p) => a + (isFinite(p.precip) ? p.precip : 0), 0)
+               * (ROUTE_STEP_MS / 3600000);
+  const mins = (s[s.length - 1].ms - s[0].ms) / 60000;
+  const fmtDur = `${Math.floor(mins / 60)} h ${String(Math.round(mins % 60)).padStart(2, '0')}`;
+  el.innerHTML =
+      `<span>on the hill <b>${fmtDur}</b></span>`
+    + `<span>climb <b>${Math.round(route.hPeak - route.hTrail)} m</b></span>`
+    + (winds.length ? `<span>wind peaks at <b>${Math.round(Math.max(...winds))} km/h</b>`
+        + (worst ? ` ${DIRS[Math.round(worst.dir / 22.5) % 16]} around `
+            + new Date(worst.ms).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' })
+          : '') + '</span>' : '')
+    + (temps.length ? `<span>temp <b>${Math.min(...temps).toFixed(1)} to `
+        + `${Math.max(...temps).toFixed(1)} \u00B0C</b></span>` : '')
+    + (feels.length ? `<span>feels as low as <b>${Math.min(...feels).toFixed(1)} \u00B0C</b></span>` : '')
+    + `<span>rain about <b>${rain.toFixed(1)} mm</b></span>`
+    + (offCount ? ` <span class="warn">${offCount} sample${offCount === 1 ? '' : 's'} `
+        + 'outside the forecast window</span>' : '');
+}
+
 function draw() {
   if (!grid) return;
+  route = buildRoute();
+  if (!route) renderRouteSummary([], 0);
   const cv = document.getElementById('chart');
   const cssW = cv.parentElement.clientWidth - 24;
   const plotW = Math.max(160, Math.round(cssW - PAD_L - PAD_R));
@@ -809,7 +1081,7 @@ function draw() {
       label: 'Temperature (\u00B0C)', arrows: false, iso: true, extra: 0 },
     { f: cS, ramp: cloudRamp, step: 25, emph: 1,
       label: 'Cloud cover, rain and cloud base', arrows: false, iso: false,
-      cloud: true, above: CLOUD_STRIP, extra: CLOUDBASE_ROW }
+      cloud: true, above: CLOUD_STRIP * 2, extra: CLOUDBASE_ROW }
   ];
 
   const blockTops = []; let y = TOP;
@@ -817,7 +1089,8 @@ function draw() {
     blockTops.push(y);
     y += HEAD + AXIS_BLOCK + (sp.above || 0) + panelH + sp.extra + AXIS_BLOCK + GAP;
   }
-  const cssH = y - GAP + 4;
+  const routeTop = y;
+  const cssH = (route ? y + ROUTE_BLOCK : y - GAP) + 4;
   const panelTops = specs.map((sp, i) => blockTops[i] + HEAD + AXIS_BLOCK + (sp.above || 0));
 
   const dpr = Math.min(2, window.devicePixelRatio || 1);
@@ -850,6 +1123,7 @@ function draw() {
     if (p.arrows && showArrows) arrows(g, PAD_L, top, plotW, panelH);
     if (p.cloud) rainBars(g, PAD_L, top, plotW, panelH);
     groundLine(g, PAD_L, top, plotW, panelH);
+    if (route) routeLine(g, top);
     g.restore();
 
     yAxis(g, PAD_L, top, panelH);
@@ -862,6 +1136,8 @@ function draw() {
     hourLabels(g, PAD_L, below, plotW);
     dayBand(g, PAD_L, below + HOUR_ROW, plotW);
   });
+
+  if (route) drawRouteChart(g, PAD_L, routeTop, plotW);
 
   const ov = document.getElementById('overlay');
   ov.width = cv.width; ov.height = cv.height; ov.style.height = cv.style.height;
@@ -935,7 +1211,10 @@ function rainBars(g, x, top, w, h) {
    style toggle governs it too, and interpolated between hours to match the
    panel rather than showing hourly steps. */
 function cloudStrips(g, x, y, w) {
-  const rows = [['High', grid.cloudHigh]];
+  /* High on top, mid beneath it, matching their real vertical order. Mid cloud
+     starts near 2 km, so on a 1500-2000 m axis it is usually off the top of the
+     panel rather than redundant with it — which is why it belongs here. */
+  const rows = [['High', grid.cloudHigh], ['Mid', grid.cloudMid]];
   g.setLineDash([]);
 
   rows.forEach(([label, arr], k) => {
@@ -1376,7 +1655,20 @@ function drawBand() {
   const g = ov.getContext('2d');
   g.setTransform(dpr, 0, 0, dpr, 0, 0);
   g.clearRect(0, 0, ov.width/dpr, ov.height/dpr);
-  if (!drag || !layout) return;
+  if (!layout) return;
+
+  if (probe) {
+    g.strokeStyle = 'rgba(0,0,0,.55)'; g.lineWidth = 1; g.setLineDash([3,3]);
+    g.beginPath();
+    g.moveTo(probe.x, probe.top); g.lineTo(probe.x, probe.top + layout.panelH);
+    g.moveTo(layout.padL, probe.y); g.lineTo(layout.padL + layout.plotW, probe.y);
+    g.stroke(); g.setLineDash([]);
+    g.beginPath(); g.arc(probe.x, probe.y, 4.5, 0, Math.PI*2);
+    g.fillStyle = '#fff'; g.fill();
+    g.strokeStyle = 'rgba(0,0,0,.8)'; g.lineWidth = 1.6; g.stroke();
+  }
+
+  if (!drag) return;
 
   const { xa, xb, ya, yb, dx, dy } = bandGeom();
   if (dx < 2 && dy < 2) return;
@@ -1439,7 +1731,7 @@ function zoomUI() {
     const x = ev.clientX - r.left, y = ev.clientY - r.top;
     const top = layout.tops.find(t => y >= t && y <= t + layout.panelH);
     if (top === undefined || x < layout.padL || x > layout.padL + layout.plotW) return;
-    drag = { x0:x, y0:y, x1:x, y1:y, top };
+    drag = { x0:x, y0:y, x1:x, y1:y, top, touch: ev.pointerType === 'touch' };
     try { cv.setPointerCapture(ev.pointerId); } catch (e) {}
   });
   cv.addEventListener('pointermove', ev => {
@@ -1451,7 +1743,14 @@ function zoomUI() {
   });
   cv.addEventListener('pointerup', () => {
     if (!drag) return;
-    applyZoom();
+    const { dx, dy } = bandGeom();
+    if (drag.touch && dx < DRAG_MIN && dy < DRAG_MIN) {
+      probe = { x: drag.x1, y: drag.y1, top: drag.top };
+      readoutAt(probe.x, probe.y);
+    } else {
+      if (dx >= DRAG_MIN || dy >= DRAG_MIN) probe = null;
+      applyZoom();
+    }
     drag = null;
     drawBand();
   });
@@ -1526,13 +1825,13 @@ function sunQ(col, hv, iHour) {
 
 const DIRS = ['N','NNE','NE','ENE','E','ESE','SE','SSE','S','SSW','SW','WSW','W','WNW','NW','NNW'];
 
-document.getElementById('chart').addEventListener('pointermove', ev => {
-  if (!layout || !grid) return;
-  const r = ev.currentTarget.getBoundingClientRect();
-  const x = ev.clientX - r.left, y = ev.clientY - r.top;
+function readoutAt(x, y) {
+  if (!layout || !grid) return false;
   const top = layout.tops.find(t => y >= t && y <= t + layout.panelH);
   const out = document.getElementById('readout');
-  if (top === undefined || x < layout.padL || x > layout.padL + layout.plotW) { out.innerHTML = ''; return; }
+  if (top === undefined || x < layout.padL || x > layout.padL + layout.plotW) {
+    out.innerHTML = ''; return false;
+  }
 
   const fx = tAtPx(x - layout.padL);
   const hv = hAtPy(y - top);
@@ -1557,9 +1856,25 @@ document.getElementById('chart').addEventListener('pointermove', ev => {
   + `, high ${Math.round(grid.cloudHigh ? grid.cloudHigh[iHour] : 0)}%</span>`
   + `<span><span class="k">precip</span> ${grid.precip[iHour].toFixed(1)} mm${grid.snow[iHour] > 0 ? ' (snow)' : ''} · ${Math.round(grid.prob[iHour])}%</span>`
   + `<span><span class="k">base</span> ${grid.cloudBase && grid.cloudBase[iHour] != null ? Math.round(grid.cloudBase[iHour]) + ' m' : '--'}</span>`;
-});
-document.getElementById('chart').addEventListener('pointerleave',
-  () => document.getElementById('readout').innerHTML = '');
+  return { top };
+}
+
+/* On a phone there is no hover: the finger is the cursor and it covers the
+   point it is reading. So a tap that does not move places a sticky crosshair
+   and leaves the values in the readout, while a drag still zooms as before. */
+(function wireReadout() {
+  const cv = document.getElementById('chart');
+  if (!cv) return;
+  cv.addEventListener('pointermove', ev => {
+    if (ev.pointerType === 'touch') return;          // handled on tap instead
+    const r = cv.getBoundingClientRect();
+    readoutAt(ev.clientX - r.left, ev.clientY - r.top);
+  });
+  cv.addEventListener('pointerleave', ev => {
+    if (ev.pointerType === 'touch' || probe) return;
+    document.getElementById('readout').innerHTML = '';
+  });
+})();
 
 /* ---------- wiring ------------------------------------------------------ */
 
@@ -1654,6 +1969,7 @@ async function load() {
     const res = await getGrid($('lat').value, $('lon').value, $('model').value, $('days').value);
     if (seq !== loadSeq) return;          // a newer request has overtaken this one
     grid = res.grid;
+    probe = null;
     if ($('model').value === 'best_match' && grid.resolved === undefined)
       grid.resolved = await identifyBestMatch($('lat').value, $('lon').value);
     if (!$('trailhead').value && grid.terrainMin != null)
@@ -1666,6 +1982,7 @@ async function load() {
     const dKm = (111.32 * Math.hypot(grid.cellLat - +$('lat').value,
                  (grid.cellLon - +$('lon').value) * Math.cos(grid.cellLat*Math.PI/180))).toFixed(1);
     const inBand = grid.levels.filter((L, i) => grid.heights[i*grid.n] <= axisTop);
+    annotateModelOption($('model').value, inBand.length, axisTop);
 
     const shown = grid.model === 'best_match'
       ? `best match &rarr; <b>${grid.resolved || 'unidentified'}</b>` : grid.model;
@@ -1797,7 +2114,64 @@ $('cloudstyle').addEventListener('change', () => {
   legends(); draw();
 });
 
+/* Cell size is the wrong number for a vertical profile — ECMWF has the coarsest
+   cell here but is also the sparsest in the vertical, because its free
+   distribution omits 975, 950, 900, 800 and 750 hPa entirely. Once a model has
+   been loaded once, record what it actually delivered in the band so the choice
+   is visible at the point of choosing rather than only afterwards. The height is
+   included in the label because it is whatever axis was set at the time. */
+function annotateModelOption(model, count, top) {
+  const o = [...$('model').options].find(x => x.value === model);
+  if (!o) return;
+  if (!o.dataset.baseLabel) o.dataset.baseLabel = o.innerHTML;
+  o.innerHTML = `${o.dataset.baseLabel} &middot; ${count} lvl &le;${top} m`;
+}
+
+/* The saved list shows elevations, so the presets should too. One batched
+   request; if it fails the labels are simply left as they were. */
+async function labelPresetElevations() {
+  const opts = [...$('place').querySelectorAll('option')]
+    .filter(o => o.value !== 'custom' && !o.closest('optgroup'));
+  if (!opts.length) return;
+  const lats = [], lons = [];
+  for (const o of opts) {
+    const [a, b] = o.value.split(',');
+    lats.push(a); lons.push(b);
+  }
+  try {
+    const j = await (await fetch('https://api.open-meteo.com/v1/elevation'
+      + `?latitude=${lats.join(',')}&longitude=${lons.join(',')}`)).json();
+    const els = Array.isArray(j.elevation) ? j.elevation : [];
+    opts.forEach((o, i) => {
+      if (els[i] == null) return;
+      if (!o.dataset.baseName) o.dataset.baseName = o.textContent;
+      o.textContent = `${o.dataset.baseName} (${Math.round(els[i])} m)`;
+    });
+  } catch (e) { /* labels stay as authored */ }
+}
+
+/* Route inputs only affect drawing, never the fetch, so they redraw rather
+   than reload. draw() rebuilds the route itself, so nothing else to do. */
+for (const id of ['rtStart', 'rtPeak', 'rtEnd', 'rtBuffer'])
+  $(id).addEventListener('change', () => { if (grid) draw(); });
+$('rtClear').addEventListener('click', () => {
+  for (const id of ['rtStart', 'rtPeak', 'rtEnd']) $(id).value = '';
+  if (grid) draw();
+});
+
+(function wireMobile() {
+  const btn = $('ctlToggle'), box = document.querySelector('.controls');
+  if (!btn || !box) return;
+  btn.addEventListener('click', () => {
+    const open = box.classList.toggle('open');
+    btn.setAttribute('aria-expanded', open ? 'true' : 'false');
+    btn.textContent = open ? 'Hide settings' : 'Settings and route';
+    if (!open && grid) draw();       // canvas width changes as the block closes
+  });
+})();
+
 renderFavs();
+labelPresetElevations();
 legends();
 load();
 </script>
